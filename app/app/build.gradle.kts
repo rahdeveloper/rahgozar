@@ -100,9 +100,19 @@ android {
         }
 
         val abiFilterList = (properties["ABI_FILTERS"] as? String)?.split(';')
+
+        // Per-ABI APKs and an app bundle cannot both be asked for: AGP fails
+        // the bundle with "Multiple shrunk-resources files found" rather than
+        // choosing for you (issuetracker 402800800). A bundle needs no splits
+        // anyway — Play does the per-device slicing itself, from the one
+        // artefact — so the split is switched off exactly for the task that
+        // cannot take it, and every APK build keeps behaving as before.
+        val buildingBundle = gradle.startParameter.taskNames.any {
+            it.contains("bundle", ignoreCase = true)
+        }
         splits {
             abi {
-                isEnable = true
+                isEnable = !buildingBundle
                 reset()
                 if (!abiFilterList.isNullOrEmpty()) {
                     include(*abiFilterList.toTypedArray())
