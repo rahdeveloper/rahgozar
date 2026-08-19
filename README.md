@@ -58,6 +58,20 @@ from, and that is what the directories above hold. Each is built differently:
 Signing needs a `keystore.properties` beside `app/build.gradle.kts`; see
 `app/keystore.properties.example`. No key material is in this repository.
 
+## Releasing
+
+```powershell
+.elease.ps1
+```
+
+It refuses to build until the working tree is committed and pushed, builds the
+Play bundle, then tags that exact commit `v<versionName>+<versionCode>` and
+pushes the tag. The order is not a convenience: a GPL release owes its
+recipients the source *it* was built from, and a tag written afterwards from a
+tree that has moved on would point at the wrong thing. `bundle` fails on an
+unpublished tree; `assemble` only warns, since an APK is for trying on a phone
+rather than for distribution.
+
 ## Licences of what ships
 
 | Component | Licence |

@@ -251,6 +251,28 @@ android {
  * That is a long way to travel before anything says why, so the build stops
  * here instead.
  */
+/**
+ * Whether git says the tree is clean and this commit is on the public remote.
+ *
+ * Null when the answer cannot be had — no git, no remote, no network. That is
+ * deliberately not a failure: a source tree unpacked from a tarball has no git
+ * at all and must still build.
+ */
+fun publishedCommitOrNull(): String? = runCatching {
+    fun git(vararg args: String): String {
+        val p = ProcessBuilder(listOf("git") + args)
+            .directory(rootDir).redirectErrorStream(true).start()
+        val out = p.inputStream.bufferedReader().readText().trim()
+        return if (p.waitFor() == 0) out else error(out)
+    }
+    if (git("status", "--porcelain").isNotEmpty()) return null
+    val head = git("rev-parse", "HEAD")
+    // `branch -r --contains` is the question that matters: is this exact commit
+    // reachable from something the remote already has.
+    if (git("branch", "-r", "--contains", head).isBlank()) return null
+    head
+}.getOrNull()
+
 tasks.configureEach {
     if ((name.startsWith("assemble") || name.startsWith("bundle")) && name.contains("Release")) {
         doFirst {
@@ -267,6 +289,26 @@ tasks.configureEach {
                         "repository, then regenerate src/main/assets/open_source_licenses.html " +
                         "which repeats the same URL. See docs/LICENSING.md.",
                 )
+            }
+
+            // The GPL obligation, enforced instead of remembered.
+            //
+            // A released binary owes its recipients *the source it was built
+            // from*. If the tree has uncommitted changes, or the commit is not
+            // on the public remote, then no published commit corresponds to
+            // this artefact and a tag pointing at one would be a false claim.
+            //
+            // `bundle` fails and `assemble` only warns, which is the same line
+            // docs/RELEASE.md already draws: the AAB is what goes to Play, the
+            // APK is for trying on a phone.
+            if (publishedCommitOrNull() == null) {
+                val message = "the working tree is not committed and pushed, so no public " +
+                    "commit corresponds to this build. Commit, push, then build — " +
+                    "release.ps1 does all of it in order. See docs/LICENSING.md."
+                if (name.startsWith("bundle")) {
+                    throw GradleException("refusing to build a release bundle: $message")
+                }
+                logger.warn("WARNING: $message")
             }
 
             if (!hasReleaseSigning) {
