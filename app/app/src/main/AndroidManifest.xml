@@ -1,0 +1,340 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    tools:ignore="MissingLeanbackLauncher">
+
+    <supports-screens
+        android:anyDensity="true"
+        android:largeScreens="true"
+        android:normalScreens="true"
+        android:smallScreens="true"
+        android:xlargeScreens="true" />
+
+    <uses-feature
+        android:name="android.software.leanback"
+        android:required="false" />
+    <uses-feature
+        android:name="android.hardware.touchscreen"
+        android:required="false" />
+
+    <!-- https://developer.android.com/about/versions/11/privacy/package-visibility -->
+    <uses-permission
+        android:name="android.permission.QUERY_ALL_PACKAGES"
+        tools:ignore="PackageVisibilityPolicy,QueryAllPackagesPermission" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"
+        tools:ignore="ForegroundServicesPolicy" />
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"
+        android:minSdkVersion="34" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!--
+        Privacy Sandbox attribution, removed on purpose.
+
+        play-services-ads merges these three into this app, and with them the
+        SDK registers ad sources with the platform's AdServices component. That
+        component then fetches the registration from its *own* uid — a system
+        uid, not this app's — so the one request most directly tied to an
+        impression this app just protected travels outside the tunnel, and no
+        VpnService configuration this app can write covers it. A per-app tun
+        cannot carry another app's traffic, and allow-listing the AdServices
+        package would push every app's attribution through the operator's
+        server, which is worse.
+
+        Removing them makes the SDK's availability check report the API absent,
+        so it never registers a source. The cost is that Privacy Sandbox
+        attribution is off for this app: some conversions go unmeasured.
+    -->
+    <uses-permission
+        android:name="android.permission.ACCESS_ADSERVICES_AD_ID"
+        tools:node="remove" />
+    <uses-permission
+        android:name="android.permission.ACCESS_ADSERVICES_ATTRIBUTION"
+        tools:node="remove" />
+    <uses-permission
+        android:name="android.permission.ACCESS_ADSERVICES_TOPICS"
+        tools:node="remove" />
+
+    <!--
+      allowBackup is off deliberately. The app holds a device private key and a
+      decrypted server list; with backup on, `adb backup` and cloud backup are
+      each a route to a copy of them off the device — exactly what the rest of
+      this design spends its effort preventing.
+
+      usesCleartextTraffic is off for the same reason the panel only accepts
+      https endpoints: anything the app fetches in the clear tells whoever is
+      watching the connection which panel this device talks to, even though the
+      payload itself is signed and encrypted.
+    -->
+    <application
+        android:name=".AngApplication"
+        android:allowBackup="false"
+        android:banner="@mipmap/ic_banner"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:supportsRtl="true"
+        android:theme="@style/AppThemeDayNight.NoActionBar"
+        android:usesCleartextTraffic="false">
+
+        <!--
+          Required by the AdMob SDK, which reads it at process start. The value
+          comes from the admobAppId Gradle property (Google's test id by
+          default) — see app/build.gradle.kts for why this one cannot be panel
+          state like the rest of the ad configuration.
+        -->
+        <meta-data
+            android:name="com.google.android.gms.ads.APPLICATION_ID"
+            android:value="${admobAppId}" />
+
+        <!--
+          The SDK would otherwise start collecting on process start, before the
+          panel has had a chance to say whether ads are on at all.
+        -->
+        <meta-data
+            android:name="com.google.android.gms.ads.DELAY_APP_MEASUREMENT_INIT"
+            android:value="true" />
+
+        <!--
+          The launcher entry, because the splash owns the panel sync: the
+          messages it shows are that sync's real stages, so it has to be running
+          before anything else.
+        -->
+        <activity
+            android:name=".ui.splash.SplashActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:theme="@style/Theme.Rahgozar.Splash">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
+
+            <meta-data
+                android:name="android.app.shortcuts"
+                android:resource="@xml/shortcuts" />
+        </activity>
+
+        <activity
+            android:name=".ui.main.MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
+            </intent-filter>
+        </activity>
+        <activity
+            android:name=".ui.settings.SettingsActivity"
+            android:exported="false" />
+        <activity
+            android:name=".ui.perappproxy.PerAppProxyActivity"
+            android:exported="false" />
+        <activity
+            android:name=".ui.apppicker.AppPickerActivity"
+            android:exported="false" />
+        <activity
+            android:name=".ui.AboutActivity"
+            android:exported="false" />
+
+        <activity
+            android:name=".ui.shortcut.ScSwitchActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:process=":RunSoLibV2RayDaemon"
+            android:theme="@style/AppThemeDayNight.NoActionBar.Translucent" />
+        <activity
+            android:name=".ui.shortcut.ScStartActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:process=":RunSoLibV2RayDaemon"
+            android:theme="@style/AppThemeDayNight.NoActionBar.Translucent" />
+        <activity
+            android:name=".ui.shortcut.ScStopActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:process=":RunSoLibV2RayDaemon"
+            android:theme="@style/AppThemeDayNight.NoActionBar.Translucent" />
+
+        <service
+            android:name=".service.CoreVpnService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:process=":RunSoLibV2RayDaemon"
+            tools:ignore="VpnServicePolicy">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.net.VpnService.SUPPORTS_ALWAYS_ON"
+                android:value="true" />
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="vpn" />
+        </service>
+
+        <!--
+            The OpenVPN tunnel. Runs in the same daemon process as the Xray one
+            because only one of them can hold a tun at a time anyway, and
+            sharing the process keeps the notification and the MSG_STATE_*
+            channel in one place. Not exported, and no always-on metadata: an
+            always-on VPN has to work before any server is chosen, which this
+            service cannot do without a profile.
+        -->
+        <service
+            android:name=".service.OpenVpnService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:process=":RunSoLibV2RayDaemon"
+            tools:ignore="VpnServicePolicy">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="vpn" />
+        </service>
+
+        <!--
+            The sing-box tunnel. Same shape as the OpenVPN one — no always-on
+            metadata because it cannot start without a configuration from the
+            panel — but NOT the same process: sing-box and Xray are both
+            gomobile builds, and two Go runtimes cannot share one process
+            because they would fight over go.Seq's native bindings. The shared
+            go.Seq in app sources picks its library by this process name; the
+            suffix here and the check in go/Seq.java must move together.
+        -->
+        <service
+            android:name=".service.SingBoxService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:process=":SingBoxDaemon"
+            tools:ignore="VpnServicePolicy">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="vpn" />
+        </service>
+
+        <!--
+            The sing-box delay test. A third process, because it must not share
+            one with the Xray runtime (CoreTestService's) nor with the tunnel's
+            libbox paths — and the connect-time gate measures while the tunnel
+            is running. Not exported: only this app may ask for a measurement.
+        -->
+        <service
+            android:name=".service.SingBoxTestService"
+            android:enabled="true"
+            android:exported="false"
+            android:process=":SingBoxTestDaemon" />
+
+        <service
+            android:name=".service.CoreProxyOnlyService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:label="@string/app_name"
+            android:process=":RunSoLibV2RayDaemon">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="proxy" />
+        </service>
+
+        <service
+            android:name=".service.CoreRootService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:label="@string/app_name"
+            android:process=":RunSoLibV2RayDaemon">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="proxy" />
+        </service>
+
+        <service
+            android:name=".service.CoreTestService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:process=":RunSoLibV2RayDaemon">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="test" />
+        </service>
+
+        <receiver
+            android:name=".receiver.WidgetProvider"
+            android:exported="true"
+            android:process=":RunSoLibV2RayDaemon">
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/app_widget_provider" />
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+                <action android:name="${applicationId}.action.widget.click" />
+                <action android:name="${applicationId}.action.activity" />
+            </intent-filter>
+        </receiver>
+        <receiver
+            android:name=".receiver.BootReceiver"
+            android:exported="true"
+            android:label="BootReceiver">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <service
+            android:name=".service.QSTileService"
+            android:exported="true"
+            android:foregroundServiceType="specialUse"
+            android:icon="@drawable/ic_stat_name"
+            android:label="@string/app_tile_name"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE"
+            android:process=":RunSoLibV2RayDaemon">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="tile" />
+        </service>
+
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge">
+
+            <meta-data
+                android:name="androidx.work.WorkManagerInitializer"
+                android:value="androidx.startup"
+                tools:node="remove" />
+
+        </provider>
+
+        <service
+            android:name="androidx.work.multiprocess.RemoteWorkManagerService"
+            android:exported="false"
+            android:process=":bg" />
+
+    </application>
+
+</manifest>

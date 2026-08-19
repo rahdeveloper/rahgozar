@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The icon tile, from the design's logo frames (6/6a/6b): a radial wash lit
+    from just above the top edge, so the mark sits against a sky rather than a
+    flat swatch. Values are the design's own `rgIconBg`.
+
+    Fills the whole 108dp adaptive canvas, not just the 72dp mask, so every
+    launcher shape — circle, squircle, teardrop — cuts into colour.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <path android:pathData="M0,0h108v108h-108z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="radial"
+                android:centerX="54"
+                android:centerY="10.8"
+                android:gradientRadius="91.8">
+                <item android:offset="0" android:color="#FF153B28" />
+                <item android:offset="1" android:color="#FF040806" />
+            </gradient>
+        </aapt:attr>
+    </path>
+</vector>

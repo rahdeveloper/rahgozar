@@ -1,0 +1,42 @@
+[
+  {
+    "remarks": "Block udp443",
+    "outboundTag": "block",
+    "port": "443",
+    "network": "udp",
+    "enabled": true
+  },
+  {
+    "remarks": "Direct LAN IP",
+    "outboundTag": "direct",
+    "ip": [
+      "geoip:private"
+    ],
+    "enabled": true
+  },
+  {
+    "remarks": "Direct LAN domains",
+    "outboundTag": "direct",
+    "domain": [
+      "geosite:private"
+    ],
+    "enabled": true
+  },
+  {
+    "remarks": "Direct Iran domains",
+    "outboundTag": "direct",
+    "domain": [
+      "domain:ir",
+      "geosite:category-ir"
+    ],
+    "enabled": true
+  },
+  {
+    "remarks": "Direct Iran IP",
+    "outboundTag": "direct",
+    "ip": [
+      "geoip:ir"
+    ],
+    "enabled": true
+  }
+]

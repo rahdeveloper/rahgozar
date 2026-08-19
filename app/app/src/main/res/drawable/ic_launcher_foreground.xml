@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    The Rahgozar mark: a road narrowing toward the horizon as it passes through
+    a tunnel, with the traveller as the dot on it.
+
+    Paths are the design's 100×100 viewBox verbatim, so they can be compared
+    with the logo frames line by line. The group does the only adaptation.
+
+    The design draws the mark at 132 of a 180 tile, but that tile is a squircle
+    with a 23% radius; a launcher that masks to a full circle crops more, and at
+    the design's ratio the mark read as a small thing floating in a lot of dark.
+    So the box is 60 rather than 52.8 — the ink then spans y 32.4..75.6 of the
+    108 canvas, still inside the 18..90 safe zone on every mask shape.
+
+    Keeping the design's coordinates and scaling by group also means the stroke
+    weights stay in proportion instead of being re-guessed per size.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <group
+        android:translateX="24"
+        android:translateY="24"
+        android:scaleX="0.6"
+        android:scaleY="0.6">
+
+        <!-- The road: wide at the viewer, narrowing to the tunnel mouth. -->
+        <path
+            android:pathData="M32,90 L45.5,22 Q50,18 54.5,22 L68,90 Z"
+            android:fillColor="#FF0D2419"
+            android:strokeWidth="3"
+            android:strokeLineJoin="round">
+            <aapt:attr name="android:strokeColor">
+                <gradient
+                    android:type="linear"
+                    android:startX="50" android:startY="0"
+                    android:endX="50" android:endY="100">
+                    <item android:offset="0" android:color="#FF6EF0B8" />
+                    <item android:offset="1" android:color="#FF22B871" />
+                </gradient>
+            </aapt:attr>
+        </path>
+
+        <!-- Centre line. Spaced by perspective, not evenly. -->
+        <path
+            android:pathData="M49.3,80 L49,70"
+            android:strokeWidth="2.6"
+            android:strokeLineCap="round">
+            <aapt:attr name="android:strokeColor">
+                <gradient
+                    android:type="linear"
+                    android:startX="50" android:startY="0"
+                    android:endX="50" android:endY="100">
+                    <item android:offset="0" android:color="#FF6EF0B8" />
+                    <item android:offset="1" android:color="#FF22B871" />
+                </gradient>
+            </aapt:attr>
+        </path>
+        <path
+            android:pathData="M49.7,61.5 L49.55,54.5"
+            android:strokeWidth="2.6"
+            android:strokeLineCap="round">
+            <aapt:attr name="android:strokeColor">
+                <gradient
+                    android:type="linear"
+                    android:startX="50" android:startY="0"
+                    android:endX="50" android:endY="100">
+                    <item android:offset="0" android:color="#FF6EF0B8" />
+                    <item android:offset="1" android:color="#FF22B871" />
+                </gradient>
+            </aapt:attr>
+        </path>
+        <path
+            android:pathData="M50.05,46 L50.2,40"
+            android:strokeWidth="2.6"
+            android:strokeLineCap="round">
+            <aapt:attr name="android:strokeColor">
+                <gradient
+                    android:type="linear"
+                    android:startX="50" android:startY="0"
+                    android:endX="50" android:endY="100">
+                    <item android:offset="0" android:color="#FF6EF0B8" />
+                    <item android:offset="1" android:color="#FF22B871" />
+                </gradient>
+            </aapt:attr>
+        </path>
+
+        <!-- The traveller. The design gives it a soft glow; a vector drawable
+             cannot blur, so it is dropped rather than faked with a halo ring. -->
+        <path android:pathData="M43.5,45.5 a6.4,6.4 0 1,0 12.8,0 a6.4,6.4 0 1,0 -12.8,0 Z">
+            <aapt:attr name="android:fillColor">
+                <gradient
+                    android:type="linear"
+                    android:startX="50" android:startY="0"
+                    android:endX="50" android:endY="100">
+                    <item android:offset="0" android:color="#FF6EF0B8" />
+                    <item android:offset="1" android:color="#FF22B871" />
+                </gradient>
+            </aapt:attr>
+        </path>
+    </group>
+</vector>

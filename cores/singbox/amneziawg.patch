@@ -1,0 +1,2758 @@
+diff --git a/go.mod b/go.mod
+index d1cca53..0776c17 100644
+--- a/go.mod
++++ b/go.mod
+@@ -198,3 +198,8 @@ require (
+ 	lukechampine.com/blake3 v1.3.0 // indirect
+ 	zombiezen.com/go/capnproto2 v2.18.2+incompatible // indirect
+ )
++
++// AmneziaWG: the vendored wireguard-go carries the obfuscation (junk packets,
++// custom magic headers, packet templates) that the `with_awg` build tag turns on.
++// Local path rather than a module version because the graft is ours to keep.
++replace github.com/sagernet/wireguard-go => ../wireguard-go-awg
+diff --git a/option/wireguard.go b/option/wireguard.go
+index d25d0d2..b3ed582 100644
+--- a/option/wireguard.go
++++ b/option/wireguard.go
+@@ -19,6 +19,12 @@ type WireGuardEndpointOptions struct {
+ 	UDPFiltering UDPNATBehavior                   `json:"udp_filtering,omitempty"`
+ 	UDPNATMax    uint32                           `json:"udp_nat_max,omitempty"`
+ 	Workers      int                              `json:"workers,omitempty"`
++	// AmneziaWG 2.0 obfuscation parameters (jc/jmin/jmax/s1..s4/h1..h4/i1..i5).
++	// Embedded (no wrapper key) so the fields are promoted to the endpoint root,
++	// matching awg-quick/.conf layout — same pattern as DialerOptions below.
++	// Effective only with the `with_awg` build tag; otherwise setting any field
++	// is an explicit error (see device_stub_awg.go).
++	AmneziaWGOptions
+ 	DialerOptions
+ }
+ 
+diff --git a/option/wireguard_awg.go b/option/wireguard_awg.go
+new file mode 100644
+index 0000000..4c0b408
+--- /dev/null
++++ b/option/wireguard_awg.go
+@@ -0,0 +1,163 @@
++package option
++
++import (
++	"strconv"
++	"strings"
++
++	E "github.com/sagernet/sing/common/exceptions"
++	"github.com/sagernet/sing/common/json"
++)
++
++// MagicHeader is one AmneziaWG magic-header parameter (H1..H4): either a
++// single uint32 or an inclusive "min-max" range (AWG 2.0 export format, e.g.
++// "43613244-384550127"). It holds the canonical spec string understood by the
++// device layer (newMagicHeader in the vendored wireguard-go): "N" for a single
++// value, "N-M" for a range, "" for unset.
++//
++// The underlying type is string so AmneziaWGOptions stays comparable (IsSet
++// relies on o != AmneziaWGOptions{}) and the zero value means "not set", as
++// the zero uint32 did before.
++type MagicHeader string
++
++// UnmarshalJSON accepts a JSON number (backward compatible with the previous
++// uint32 field: "h1": 1234567890) or a JSON string "N" / "N-M". The single
++// value 0 (and "", "0") normalizes to unset, preserving the previous
++// zero-value semantics.
++func (h *MagicHeader) UnmarshalJSON(data []byte) error {
++	var spec string
++	if len(data) > 0 && data[0] == '"' {
++		err := json.Unmarshal(data, &spec)
++		if err != nil {
++			return err
++		}
++	} else {
++		var value uint32
++		err := json.Unmarshal(data, &value)
++		if err != nil {
++			return E.New("invalid magic header ", string(data), ": expected uint32 or \"min-max\" string")
++		}
++		spec = strconv.FormatUint(uint64(value), 10)
++	}
++	normalized, err := normalizeMagicHeader(spec)
++	if err != nil {
++		return err
++	}
++	*h = normalized
++	return nil
++}
++
++// MarshalJSON keeps type fidelity with the previous uint32 field: a single
++// value marshals back to a JSON number, only a range becomes a JSON string.
++func (h MagicHeader) MarshalJSON() ([]byte, error) {
++	normalized, err := normalizeMagicHeader(string(h))
++	if err != nil {
++		return nil, err
++	}
++	if normalized == "" {
++		return []byte("0"), nil
++	}
++	if !strings.Contains(string(normalized), "-") {
++		return []byte(normalized), nil
++	}
++	return json.Marshal(string(normalized))
++}
++
++// Spec re-validates the header and returns the canonical IpcSet value (""
++// when unset). The device layer calls it so options constructed in code
++// (libbox/launcher, bypassing JSON) are still checked before IpcSet.
++func (h MagicHeader) Spec() (string, error) {
++	normalized, err := normalizeMagicHeader(string(h))
++	return string(normalized), err
++}
++
++// normalizeMagicHeader validates spec as "N" or "N-M" (both uint32, N ≤ M)
++// and returns the canonical form: "" for unset/zero, "N" for a single value
++// (including "N-N"), "N-M" for a range — mirroring magic-header.go in the
++// vendored wireguard-go.
++func normalizeMagicHeader(spec string) (MagicHeader, error) {
++	spec = strings.TrimSpace(spec)
++	if spec == "" {
++		return "", nil
++	}
++	parts := strings.Split(spec, "-")
++	if len(parts) > 2 {
++		return "", E.New("invalid magic header ", strconv.Quote(spec), ": expected uint32 or \"min-max\"")
++	}
++	start, err := strconv.ParseUint(strings.TrimSpace(parts[0]), 10, 32)
++	if err != nil {
++		return "", E.New("invalid magic header ", strconv.Quote(spec), ": parse ", strconv.Quote(parts[0]), ": ", err)
++	}
++	end := start
++	if len(parts) == 2 {
++		end, err = strconv.ParseUint(strings.TrimSpace(parts[1]), 10, 32)
++		if err != nil {
++			return "", E.New("invalid magic header ", strconv.Quote(spec), ": parse ", strconv.Quote(parts[1]), ": ", err)
++		}
++	}
++	if end < start {
++		return "", E.New("invalid magic header ", strconv.Quote(spec), ": range start > end")
++	}
++	if end == 0 {
++		return "", nil
++	}
++	if start == end {
++		return MagicHeader(strconv.FormatUint(start, 10)), nil
++	}
++	return MagicHeader(strconv.FormatUint(start, 10) + "-" + strconv.FormatUint(end, 10)), nil
++}
++
++// AmneziaWGOptions carries the AmneziaWG (AWG) obfuscation parameters that
++// extend a plain WireGuard endpoint into an AmneziaWG 2.0 client.
++//
++// It is a downstream (sing-box-lx) addition; upstream sing-box has no AWG
++// support. The struct is always present in the option model so that configs
++// parse identically with and without the `with_awg` build tag — the tag only
++// gates whether these values are actually applied to the device (see
++// transport/wireguard/device_awg.go vs device_stub_awg.go). Without the tag a
++// config that sets any AWG field is rejected with an explicit
++// "awg support not built" error rather than silently downgrading to plain
++// WireGuard (which would defeat the obfuscation).
++//
++// Field semantics (AmneziaWG wire format, see the amneziawg-go IpcSet keys):
++//   - Jc/Jmin/Jmax: junk packet count and min/max sizes sent before the
++//     handshake.
++//   - S1/S2: extra junk prepended to the init / response handshake messages.
++//   - H1..H4: magic header values overriding the four WireGuard message types;
++//     each is a single uint32 or an inclusive "min-max" range (AWG 2.0).
++//   - I1..I5: AmneziaWG 2.0 "controlled packet sequence" (CPS) packets. These
++//     are case-sensitive strings (UPPERCASE keywords like <b 0x...>, <c>, <t>,
++//     <r N>) and the order matters; I1 is typically a real protocol snapshot
++//     (e.g. a QUIC Initial). They map 1:1 to the amneziawg-go i1..i5 keys.
++//   - Id/Ip/Ib: WireSock-style declarative masquerade sugar over I1. Instead of
++//     hand-writing an I1 CPS string, the user names a masquerade domain (Id),
++//     protocol (Ip: quic|dns|stun|sip) and browser (Ib), and the device layer
++//     (transport/wireguard/masque_awg.go) generates the I1 CPS string for them.
++//     They are mutually exclusive with an explicit I1. See SPECS/TASKS/009-*.
++type AmneziaWGOptions struct {
++	Jc   uint32      `json:"jc,omitempty"`
++	Jmin uint32      `json:"jmin,omitempty"`
++	Jmax uint32      `json:"jmax,omitempty"`
++	S1   uint32      `json:"s1,omitempty"`
++	S2   uint32      `json:"s2,omitempty"`
++	S3   uint32      `json:"s3,omitempty"`
++	S4   uint32      `json:"s4,omitempty"`
++	H1   MagicHeader `json:"h1,omitempty"`
++	H2   MagicHeader `json:"h2,omitempty"`
++	H3   MagicHeader `json:"h3,omitempty"`
++	H4   MagicHeader `json:"h4,omitempty"`
++	I1   string      `json:"i1,omitempty"`
++	I2   string      `json:"i2,omitempty"`
++	I3   string      `json:"i3,omitempty"`
++	I4   string      `json:"i4,omitempty"`
++	I5   string      `json:"i5,omitempty"`
++	Id   string      `json:"id,omitempty"` // masquerade domain; required for ip=quic/dns/sip, optional for stun
++	Ip   string      `json:"ip,omitempty"` // masquerade protocol: quic | dns | stun | sip
++	Ib   string      `json:"ib,omitempty"` // masquerade browser: chrome | firefox | curl (limited effect, see masque_awg.go)
++}
++
++// IsSet reports whether any AmneziaWG obfuscation parameter has been
++// configured. It is used by the device builder/stub to decide whether AWG
++// handling is required for this endpoint.
++func (o AmneziaWGOptions) IsSet() bool {
++	return o != AmneziaWGOptions{}
++}
+diff --git a/protocol/wireguard/endpoint.go b/protocol/wireguard/endpoint.go
+index a3eeac2..8d27f1b 100644
+--- a/protocol/wireguard/endpoint.go
++++ b/protocol/wireguard/endpoint.go
+@@ -126,6 +126,11 @@ func NewEndpoint(ctx context.Context, router adapter.Router, logger log.ContextL
+ 			}
+ 		}),
+ 		Workers: options.Workers,
++		// Carry the AmneziaWG obfuscation params to the transport device. They
++		// are applied only under the `with_awg` build tag; without it a
++		// non-empty value is rejected with an explicit "not built" error rather
++		// than silently downgraded to plain WireGuard.
++		AmneziaWG: options.AmneziaWGOptions,
+ 	})
+ 	if err != nil {
+ 		return nil, err
+diff --git a/transport/wireguard/awg_ipc_rahgozar_test.go b/transport/wireguard/awg_ipc_rahgozar_test.go
+new file mode 100644
+index 0000000..159c730
+--- /dev/null
++++ b/transport/wireguard/awg_ipc_rahgozar_test.go
+@@ -0,0 +1,76 @@
++//go:build with_awg
++
++package wireguard
++
++import (
++	"strings"
++	"testing"
++
++	"github.com/sagernet/sing-box/option"
++)
++
++// The app builds AmneziaWG endpoints by writing these option fields, so what
++// this file pins down is the contract between the config generator and the
++// device: which keys reach IpcSet, in what form, and which inputs are refused
++// before they can reach a running device.
++
++func TestAWGIpcLinesUnsetIsEmpty(t *testing.T) {
++	// A plain WireGuard endpoint must produce byte-identical device config to
++	// upstream even in a with_awg build — otherwise turning the tag on would
++	// silently change every existing endpoint.
++	lines, err := awgIpcLines(option.AmneziaWGOptions{})
++	if err != nil {
++		t.Fatalf("unexpected error: %v", err)
++	}
++	if lines != "" {
++		t.Fatalf("expected no lines for an unset config, got %q", lines)
++	}
++}
++
++func TestAWGIpcLinesRendersParameters(t *testing.T) {
++	lines, err := awgIpcLines(option.AmneziaWGOptions{
++		Jc: 4, Jmin: 40, Jmax: 70,
++		S1: 15, S2: 20,
++		H1: "1234567", H2: "2345678", H3: "3456789-4000000", H4: "4567890",
++	})
++	if err != nil {
++		t.Fatalf("unexpected error: %v", err)
++	}
++	for _, want := range []string{
++		"\njc=4", "\njmin=40", "\njmax=70",
++		"\ns1=15", "\ns2=20",
++		"\nh1=1234567", "\nh2=2345678", "\nh4=4567890",
++		// A ranged magic header keeps its "min-max" form all the way to IpcSet;
++		// collapsing it to a single value would drop the randomisation that
++		// makes the header unfingerprintable.
++		"\nh3=3456789-4000000",
++	} {
++		if !strings.Contains(lines, want) {
++			t.Errorf("missing %q in %q", want, lines)
++		}
++	}
++	// Zero-valued keys are omitted rather than sent as 0: amneziawg-go treats a
++	// present-but-zero s3/s4 differently from absent.
++	for _, unwanted := range []string{"\ns3=", "\ns4=", "\ni1=", "\ni2="} {
++		if strings.Contains(lines, unwanted) {
++			t.Errorf("unexpected %q in %q", unwanted, lines)
++		}
++	}
++}
++
++func TestAWGIpcLinesRejectsInvertedJunkRange(t *testing.T) {
++	// jmin > jmax makes amneziawg-go's rand.Int argument non-positive and
++	// panics in the retransmit-timer goroutine, long after the config was
++	// accepted. It has to fail here, where there is someone to tell.
++	_, err := awgIpcLines(option.AmneziaWGOptions{Jc: 3, Jmin: 90, Jmax: 40})
++	if err == nil {
++		t.Fatal("expected jmin > jmax to be rejected")
++	}
++}
++
++func TestAWGIpcLinesRejectsInvalidMagicHeader(t *testing.T) {
++	_, err := awgIpcLines(option.AmneziaWGOptions{H1: "5000-100"})
++	if err == nil {
++		t.Fatal("expected a reversed magic header range to be rejected")
++	}
++}
+diff --git a/transport/wireguard/awg_reserved_rahgozar_test.go b/transport/wireguard/awg_reserved_rahgozar_test.go
+new file mode 100644
+index 0000000..7e01aa7
+--- /dev/null
++++ b/transport/wireguard/awg_reserved_rahgozar_test.go
+@@ -0,0 +1,54 @@
++package wireguard
++
++import (
++	"net/netip"
++	"testing"
++)
++
++// ClientBind is the bind used when a WireGuard endpoint rides a detour — which
++// is exactly how an AmneziaWG endpoint gets its UDP carried inside someone
++// else's TCP. It was rewriting bytes 1-3 of every packet for Cloudflare WARP's
++// "reserved" field, which is the same space AmneziaWG puts its magic header in,
++// so an AWG endpoint on a detour dropped every packet. These tests pin the
++// guard that decides whether that rewrite happens at all.
++
++func TestHasReservedIsFalseWhenNothingIsConfigured(t *testing.T) {
++	bind := &ClientBind{reservedForEndpoint: make(map[netip.AddrPort][3]uint8)}
++	if bind.hasReserved() {
++		t.Fatal("a bind with no reserved value must not rewrite header bytes")
++	}
++}
++
++func TestHasReservedIsFalseForAllZeroPerEndpointValues(t *testing.T) {
++	// The per-endpoint map is populated for every peer, so its mere presence
++	// says nothing. Only a non-zero value means WARP.
++	bind := &ClientBind{
++		reservedForEndpoint: map[netip.AddrPort][3]uint8{
++			netip.MustParseAddrPort("203.0.113.10:51820"): {0, 0, 0},
++		},
++	}
++	if bind.hasReserved() {
++		t.Fatal("an all-zero per-endpoint reserved value must not count")
++	}
++}
++
++func TestHasReservedIsTrueForADeviceWideValue(t *testing.T) {
++	bind := &ClientBind{
++		reserved:            [3]uint8{1, 2, 3},
++		reservedForEndpoint: make(map[netip.AddrPort][3]uint8),
++	}
++	if !bind.hasReserved() {
++		t.Fatal("a configured device-wide reserved value must still be honoured")
++	}
++}
++
++func TestHasReservedIsTrueForAPerEndpointValue(t *testing.T) {
++	bind := &ClientBind{
++		reservedForEndpoint: map[netip.AddrPort][3]uint8{
++			netip.MustParseAddrPort("203.0.113.10:51820"): {9, 0, 0},
++		},
++	}
++	if !bind.hasReserved() {
++		t.Fatal("a per-endpoint reserved value must still be honoured")
++	}
++}
+diff --git a/transport/wireguard/awg_stub_rahgozar_test.go b/transport/wireguard/awg_stub_rahgozar_test.go
+new file mode 100644
+index 0000000..0f7536a
+--- /dev/null
++++ b/transport/wireguard/awg_stub_rahgozar_test.go
+@@ -0,0 +1,30 @@
++//go:build !with_awg
++
++package wireguard
++
++import (
++	"testing"
++
++	"github.com/sagernet/sing-box/option"
++)
++
++// Without the tag the AWG parameters must be refused, not ignored. A build that
++// quietly dropped them would hand the user a plain WireGuard tunnel while the
++// panel and the UI both said AmneziaWG — the obfuscation gone and nobody told.
++
++func TestAWGStubRejectsAConfiguredEndpoint(t *testing.T) {
++	_, err := awgIpcLines(option.AmneziaWGOptions{Jc: 4, Jmin: 40, Jmax: 70})
++	if err == nil {
++		t.Fatal("expected an AWG config to be rejected in a build without with_awg")
++	}
++}
++
++func TestAWGStubAllowsAPlainEndpoint(t *testing.T) {
++	lines, err := awgIpcLines(option.AmneziaWGOptions{})
++	if err != nil {
++		t.Fatalf("a plain WireGuard endpoint must still build: %v", err)
++	}
++	if lines != "" {
++		t.Fatalf("expected no device lines, got %q", lines)
++	}
++}
+diff --git a/transport/wireguard/client_bind.go b/transport/wireguard/client_bind.go
+index e0e8b64..a32ae64 100644
+--- a/transport/wireguard/client_bind.go
++++ b/transport/wireguard/client_bind.go
+@@ -50,6 +50,21 @@ func NewClientBind(ctx context.Context, logger logger.Logger, dialer N.Dialer, i
+ 	}
+ }
+ 
++// hasReserved reports whether any Cloudflare "reserved" value is configured
++// (WARP). With none set the bind must leave bytes 1-3 alone, so a plain
++// WireGuard or AmneziaWG endpoint keeps its header intact.
++func (c *ClientBind) hasReserved() bool {
++	if c.reserved != [3]uint8{} {
++		return true
++	}
++	for _, reserved := range c.reservedForEndpoint {
++		if reserved != [3]uint8{} {
++			return true
++		}
++	}
++	return false
++}
++
+ func (c *ClientBind) connect() (*wireConn, error) {
+ 	serverConn := c.conn
+ 	if serverConn != nil {
+@@ -134,7 +149,13 @@ func (c *ClientBind) receive(packets [][]byte, sizes []int, eps []conn.Endpoint)
+ 		return
+ 	}
+ 	sizes[0] = n
+-	if n > 3 {
++	// Only strip the Cloudflare "reserved" bytes when a reserved value is
++	// actually configured (WARP). AmneziaWG writes a full uint32 magic header
++	// into bytes 0-3; clearing 1-3 unconditionally destroys ranged h1-h4
++	// headers and the endpoint then drops every packet. StdNetBind — the
++	// no-detour path — never clears on receive either, which is why this only
++	// ever bites AmneziaWG when it rides a detour.
++	if n > 3 && c.hasReserved() {
+ 		b := packets[0]
+ 		clear(b[1:4])
+ 	}
+@@ -179,7 +200,13 @@ func (c *ClientBind) Send(bufs [][]byte, ep conn.Endpoint, offset int) error {
+ 			if !loaded {
+ 				reserved = c.reserved
+ 			}
+-			copy(buf[1:4], reserved[:])
++			// Stamp only when non-zero, for the same reason as the receive
++			// side: a plain WireGuard or AmneziaWG endpoint has no reserved
++			// value, and zeroing bytes 1-3 would wipe the upper bytes of an
++			// AWG magic header on the way out.
++			if reserved != [3]uint8{} {
++				copy(buf[1:4], reserved[:])
++			}
+ 		}
+ 		_, err = udpConn.WriteToUDPAddrPort(buf, destination)
+ 		if err != nil {
+diff --git a/transport/wireguard/device_awg.go b/transport/wireguard/device_awg.go
+new file mode 100644
+index 0000000..de4d548
+--- /dev/null
++++ b/transport/wireguard/device_awg.go
+@@ -0,0 +1,131 @@
++//go:build with_awg
++
++package wireguard
++
++import (
++	"strings"
++
++	"github.com/sagernet/sing-box/option"
++	E "github.com/sagernet/sing/common/exceptions"
++	F "github.com/sagernet/sing/common/format"
++)
++
++// awgIpcLines renders the AmneziaWG 2.0 device-global obfuscation parameters as
++// amneziawg-go IpcSet config lines, ready to be appended to the WireGuard
++// device configuration (after private_key/listen_port, before peer sections).
++//
++// Output format (one key per line, leading "\n", no trailing newline):
++//
++//	\njc=<n>\njmin=<n>\njmax=<n>\ns1=<n>\ns2=<n>\ns3=<n>\ns4=<n>\nh1=<spec>\nh2=<spec>\nh3=<spec>\nh4=<spec>
++//	\ni1=<str>\ni2=<str>...
++//
++// Numeric keys are emitted only when non-zero. The h1..h4 values are magic
++// header specs — a single uint32 ("N") or an inclusive range ("N-M", AWG 2.0)
++// — emitted in the exact format newMagicHeader expects on the uapi side;
++// unset headers are omitted. The I1..I5 keys are emitted only
++// when non-empty and are written verbatim — their value is case-sensitive
++// (uppercase keywords) and must not be normalised. Returns "" when no AWG
++// parameter is set, so a plain WireGuard endpoint produces byte-identical
++// config to upstream even in a `with_awg` build.
++//
++// These keys correspond to the AmneziaWG handshake-obfuscation knobs parsed by
++// amneziawg-go's device.IpcSetOperation. With `with_awg` the wireguard-go
++// dependency is replaced by amnezia-vpn/amneziawg-go, which understands them;
++// upstream wireguard-go would reject the unknown keys at IpcSet time.
++func awgIpcLines(o option.AmneziaWGOptions) (string, error) {
++	if !o.IsSet() {
++		return "", nil
++	}
++	if err := validateJunk(o); err != nil {
++		return "", err
++	}
++	var b strings.Builder
++	writeUint := func(key string, value uint32) {
++		if value != 0 {
++			b.WriteString("\n")
++			b.WriteString(key)
++			b.WriteString("=")
++			b.WriteString(F.ToString(value))
++		}
++	}
++	writeStr := func(key, value string) {
++		if value != "" {
++			b.WriteString("\n")
++			b.WriteString(key)
++			b.WriteString("=")
++			b.WriteString(value)
++		}
++	}
++	writeMagic := func(key string, value option.MagicHeader) error {
++		spec, err := value.Spec()
++		if err != nil {
++			return E.Cause(err, key)
++		}
++		writeStr(key, spec)
++		return nil
++	}
++	// WireSock-style id/ip/ib masquerade is sugar over I1 (and, for ip=quic and
++	// ip=sip, also I2): masqueI1I2 generates both CPS strings in one pass. It
++	// returns "" for both when no masquerade is set, and errors on a conflict
++	// with an explicit I1 or on invalid id/ip/ib. When set, its output is used
++	// as the i1/i2 values below.
++	i1 := o.I1
++	i2 := o.I2
++	masque, masque2, err := masqueI1I2(o)
++	if err != nil {
++		return "", err
++	}
++	if masque != "" {
++		i1 = masque
++		// ip=sip fills i2 with the matching 100 Trying of the INVITE dialog (quic
++		// and dns/stun are single-packet and leave i2 empty). A user-supplied i2
++		// alongside an i2-filling sugar profile is ambiguous, exactly like the i1
++		// conflict masqueI1 already rejects.
++		if masque2 != "" {
++			if o.I2 != "" {
++				return "", E.New("amneziawg: id/ip/ib masquerade (ip=sip) fills i2; an explicit i2 conflicts with it")
++			}
++			i2 = masque2
++		}
++	}
++
++	writeUint("jc", o.Jc)
++	writeUint("jmin", o.Jmin)
++	writeUint("jmax", o.Jmax)
++	writeUint("s1", o.S1)
++	writeUint("s2", o.S2)
++	writeUint("s3", o.S3)
++	writeUint("s4", o.S4)
++	for _, header := range []struct {
++		key   string
++		value option.MagicHeader
++	}{{"h1", o.H1}, {"h2", o.H2}, {"h3", o.H3}, {"h4", o.H4}} {
++		if err := writeMagic(header.key, header.value); err != nil {
++			return "", err
++		}
++	}
++	writeStr("i1", i1)
++	writeStr("i2", i2)
++	writeStr("i3", o.I3)
++	writeStr("i4", o.I4)
++	writeStr("i5", o.I5)
++	return b.String(), nil
++}
++
++// validateJunk rejects a jmin/jmax junk-size range with jmin > jmax before it
++// reaches the device, so a bad config fails at endpoint build / `sing-box check`
++// with a clear error instead of panicking later at handshake time. The vendored
++// amneziawg-go (device/send.go) sizes each junk packet rand(0..jmax-jmin)+jmin
++// before a handshake initiation; jmax < jmin makes rand.Int's argument <= 0 and
++// panics in the retransmit-timer goroutine. amneziawg-go's uapi checks each
++// field > 0 individually but not jmin <= jmax, which is why we add it here.
++//
++// Only this crash case is guarded: jc>0 without sizes (sends empty junk) or
++// sizes without jc (junk never sent) are wasteful but harmless and stay allowed,
++// to keep the diff minimal and avoid rejecting a working real-server config.
++func validateJunk(o option.AmneziaWGOptions) error {
++	if o.Jmin > o.Jmax {
++		return E.New("amneziawg: jmin (", F.ToString(o.Jmin), ") must be <= jmax (", F.ToString(o.Jmax), ")")
++	}
++	return nil
++}
+diff --git a/transport/wireguard/device_stub_awg.go b/transport/wireguard/device_stub_awg.go
+new file mode 100644
+index 0000000..e5d6a3f
+--- /dev/null
++++ b/transport/wireguard/device_stub_awg.go
+@@ -0,0 +1,21 @@
++//go:build !with_awg
++
++package wireguard
++
++import (
++	"github.com/sagernet/sing-box/option"
++	E "github.com/sagernet/sing/common/exceptions"
++)
++
++// awgIpcLines is the no-`with_awg` stub. AmneziaWG obfuscation is not compiled
++// in, so any endpoint that configures AWG fields is rejected with an explicit
++// error instead of silently falling back to plain WireGuard — a silent
++// downgrade would strip the obfuscation the user asked for. When no AWG field
++// is set it returns "" and the endpoint behaves exactly like upstream
++// WireGuard.
++func awgIpcLines(o option.AmneziaWGOptions) (string, error) {
++	if o.IsSet() {
++		return "", E.New("AmneziaWG (awg) support is not included in this build, rebuild with -tags with_awg")
++	}
++	return "", nil
++}
+diff --git a/transport/wireguard/endpoint.go b/transport/wireguard/endpoint.go
+index 8b2e87e..dcad6a4 100644
+--- a/transport/wireguard/endpoint.go
++++ b/transport/wireguard/endpoint.go
+@@ -54,6 +54,15 @@ func NewEndpoint(options EndpointOptions) (*Endpoint, error) {
+ 	if options.ListenPort != 0 {
+ 		ipcConf += "\nlisten_port=" + F.ToString(options.ListenPort)
+ 	}
++	// Append the AmneziaWG device-global obfuscation lines (jc=/h1=/i1=…) to the
++	// device config. awgIpcLines is tag-gated: with `with_awg` it formats the
++	// params, without it a non-empty AWG config is an explicit error. Either way
++	// an endpoint that sets nothing produces byte-identical config to upstream.
++	awgLines, err := awgIpcLines(options.AmneziaWG)
++	if err != nil {
++		return nil, err
++	}
++	ipcConf += awgLines
+ 	var peers []peerConfig
+ 	for peerIndex, rawPeer := range options.Peers {
+ 		peer := peerConfig{
+@@ -99,8 +108,34 @@ func NewEndpoint(options EndpointOptions) (*Endpoint, error) {
+ 		return nil, err
+ 	}
+ 	allowedAddresses := allowedIPSet.Prefixes()
++	// AmneziaWG's s4 prepends junk bytes to every transport (data) message, so
++	// an AWG endpoint needs a lower MTU than plain WireGuard. s3 pads only
++	// cookie-reply messages, never data packets, so it is not part of the
++	// per-transport overhead.
++	awgJunk := options.AmneziaWG.S4
+ 	if options.MTU == 0 {
+ 		options.MTU = 1408
++		// With junk active the plain 1408 default already overflows the path,
++		// so fall back to the recommended AWG client MTU rather than shipping a
++		// value we would then have to warn about.
++		if awgJunk > 0 {
++			options.MTU = 1280
++		}
++	}
++	// An explicitly-set MTU that is still too high for the junk overhead lets
++	// the handshake succeed and then fails every transport packet with EMSGSIZE
++	// ("sendmsg: message too long"), which reads as a server problem. The budget
++	// assumes a conservative 1492-byte (PPPoE) path; raw Ethernet is 1500.
++	if awgJunk > 0 {
++		const pathMTU = 1492
++		const wgOverhead = 28 + 32 // UDP/IP + WireGuard transport header
++		if budget := pathMTU - wgOverhead - int(awgJunk); int(options.MTU) > budget {
++			options.Logger.Warn(F.ToString(
++				"amneziawg: mtu ", options.MTU, " may be too high for s4 junk (", awgJunk,
++				" bytes); transport packets can exceed a ", pathMTU,
++				"-byte path and fail with \"message too long\". Consider mtu <= ", budget, " (or 1280)",
++			))
++		}
+ 	}
+ 	deviceOptions := DeviceOptions{
+ 		Context:         options.Context,
+diff --git a/transport/wireguard/endpoint_options.go b/transport/wireguard/endpoint_options.go
+index 8a2b5f5..b8f585b 100644
+--- a/transport/wireguard/endpoint_options.go
++++ b/transport/wireguard/endpoint_options.go
+@@ -5,6 +5,7 @@ import (
+ 	"net/netip"
+ 	"time"
+ 
++	"github.com/sagernet/sing-box/option"
+ 	"github.com/sagernet/sing-tun"
+ 	"github.com/sagernet/sing/common/control"
+ 	"github.com/sagernet/sing/common/logger"
+@@ -35,6 +36,10 @@ type EndpointOptions struct {
+ 	ResolvePeer       func(domain string) (netip.Addr, error)
+ 	Peers             []PeerOptions
+ 	Workers           int
++	// AmneziaWG 2.0 obfuscation parameters, carried from the endpoint options.
++	// Consumed only under the `with_awg` build tag (see device_awg.go); with the
++	// tag off, a non-empty value is rejected by device_stub_awg.go.
++	AmneziaWG option.AmneziaWGOptions
+ }
+ 
+ type PeerOptions struct {
+diff --git a/transport/wireguard/masque_awg.go b/transport/wireguard/masque_awg.go
+new file mode 100644
+index 0000000..06420e1
+--- /dev/null
++++ b/transport/wireguard/masque_awg.go
+@@ -0,0 +1,443 @@
++//go:build with_awg
++
++// Masquerade I1 generators (009) — WireSock-style declarative obfuscation.
++//
++// All four profiles are client-initiated decoys: QUIC = fragmented Initial
++// (quic_initial_awg.go), STUN = WebRTC Binding Request (stun_request_awg.go),
++// DNS = client query (masqueDNSQueryCPS below), SIP = INVITE request with SDP
++// (sip_invite_awg.go). The DNS/SIP packet shapes are inspired by the open-source
++// WireSock reference, but translated from its server-side responses into the
++// client-side requests a UA actually sends first:
++//
++//	https://github.com/wiresock/amneziawg-install
++//	amneziawg-proxy/src/transform.rs (MIT License, Copyright (c) WireSock)
++//	amneziawg-proxy/src/quic_handshake.rs::is_valid_sni_hostname
++//
++// The LDH hostname validator (validateMasqueDomain) mirrors WireSock's
++// is_valid_sni_hostname.
++//
++// IMPORTANT — model difference from WireSock. WireSock is a *server-side* UDP
++// proxy that rewrites the leading S1–S4 padding of a datagram whose tail is the
++// real (encrypted) WireGuard ciphertext. Its generators seed a PRNG from that
++// tail and size length fields to cover it. We instead emit a *standalone* I1
++// decoy packet sent before the handshake (amneziawg-go send.go calls
++// Obfuscate(buf, nil) — src is nil, so there is no ciphertext tail). We
++// therefore port the protocol *structure* but make every decoy self-contained:
++// the whole datagram is the CPS output, length fields cover only the bytes we
++// actually emit, and entropy comes from the engine's <r N> tag (cryptographic
++// randomness, fresh per packet) rather than a payload-seeded LCG. This is an
++// honest decoy, not a byte-for-byte replay of WireSock traffic.
++package wireguard
++
++import (
++	"encoding/hex"
++	"fmt"
++	"strconv"
++	"strings"
++
++	"github.com/sagernet/sing-box/option"
++	E "github.com/sagernet/sing/common/exceptions"
++)
++
++// Masquerade protocol identifiers (option.AmneziaWGOptions.Ip).
++const (
++	masqueProtoQUIC = "quic"
++	masqueProtoDNS  = "dns"
++	masqueProtoSTUN = "stun"
++	masqueProtoSIP  = "sip"
++)
++
++// masqueI1 turns the WireSock-style Id/Ip/Ib masquerade sugar into an
++// AmneziaWG I1 "controlled packet sequence" (CPS) string, or returns "" when no
++// masquerade is configured (Id/Ip/Ib all empty).
++//
++// The returned string is a CPS spec understood by the vendored amneziawg-go
++// obfuscation engine (newObfChain): a sequence of <b 0xHEX> (static bytes),
++// <r N> (N cryptographically-random bytes), <rc N> (N random ASCII letters) and
++// <rd N> (N random digits) tags. When the chain is obfuscated with a nil source
++// (as I1 decoys are, see amneziawg-go send.go), the whole output is this fixed
++// skeleton plus fresh randomness — a self-contained protocol-shaped decoy.
++//
++// It enforces the validation rules (mutual exclusion with an explicit I1,
++// known Ip, known Ib, strict LDH Id) and fails fast with a clear error so a bad
++// config is rejected at endpoint build / `sing-box check` rather than silently
++// degrading.
++func masqueI1(o option.AmneziaWGOptions) (string, error) {
++	if o.Id == "" && o.Ip == "" && o.Ib == "" {
++		return "", nil
++	}
++
++	// Mutual exclusion: id/ip/ib are sugar over I1, so a config that sets both
++	// is ambiguous (which one wins?) and almost certainly a mistake.
++	if o.I1 != "" {
++		return "", E.New("amneziawg: id/ip/ib masquerade conflicts with an explicit i1; use one or the other")
++	}
++
++	proto := strings.ToLower(strings.TrimSpace(o.Ip))
++	if proto == "" {
++		return "", E.New("amneziawg: ip (masquerade protocol) is required when id/ib is set; one of quic|dns|stun|sip")
++	}
++
++	// id is REQUIRED only for quic (it becomes the ClientHello SNI). dns and sip
++	// use it on the wire (QNAME / SIP host) but fall back to a generated pseudo
++	// name when empty, so id is optional there; stun is hostname-less and ignores
++	// it. Whenever id IS set (any protocol) it is still LDH-validated — it must
++	// never reach the wire unchecked.
++	domain := strings.TrimSpace(o.Id)
++	if domain != "" {
++		if err := validateMasqueDomain(domain); err != nil {
++			return "", err
++		}
++	}
++
++	browser, err := normalizeMasqueBrowser(o.Ib, proto)
++	if err != nil {
++		return "", err
++	}
++
++	switch proto {
++	case masqueProtoQUIC:
++		if domain == "" {
++			return "", E.New("amneziawg: id (masquerade domain) is required for ip=quic (it becomes the ClientHello SNI)")
++		}
++		return masqueQUICInitialCPS(domain, browser)
++	case masqueProtoSTUN:
++		return masqueSTUNRequestCPS()
++	case masqueProtoDNS:
++		// id optional for dns: used as the QNAME when set, else a pseudo-domain is
++		// generated (PseudoGen, domain-only — never an IP). A set id is LDH-validated above.
++		if domain == "" {
++			domain = pgDomainHost()
++		}
++		return masqueDNSQueryCPS(domain)
++	case masqueProtoSIP:
++		// id optional for sip: used as the SIP host when set, else a pseudo-host
++		// is generated (PseudoGen). A set id is still LDH-validated above.
++		// ip=sip is multi-packet: i1 = a complete INVITE, i2 = the matching 100
++		// Trying for the SAME dialog (filled by masqueI1I2). This path returns the
++		// INVITE; masqueI1I2 rebuilds the pair in one pass so both share a dialog.
++		return masqueSIPInviteCPS(newSIPDialog(domain))
++	default:
++		return "", E.New("amneziawg: unknown masquerade protocol ", strconv.Quote(proto), "; one of quic|dns|stun|sip")
++	}
++}
++
++// masqueI1I2 builds both decoy slots (i1, i2) from the id/ip/ib sugar in a
++// single call, so multi-packet profiles whose two halves must agree are built
++// from ONE generation pass. It returns ("","",nil) when no masquerade is set.
++//
++//   - ip=quic   → ONE fragmented QUIC Initial (i1 only, i2 == ""). A single
++//     Initial is exactly what a real client sends to start one QUIC session;
++//     two Initials with different DCIDs would read as two abandoned sessions
++//     (each DCID is a distinct connection), which is more anomalous, not less.
++//     Realism comes from the browser-accurate ClientHello (Ib → uTLS), not from
++//     packet count.
++//   - ip=sip    → ONE INVITE fragmented into head (i1) + body (i2). Both come
++//     from a single masqueSIPInviteSplitCPS call, so the shared host and the
++//     Content-Length announced in the head match the body byte-for-byte.
++//   - dns/stun  → single-packet decoys: i1 only, i2 == "".
++//
++// i1 is produced by masqueI1 (which also runs all validation); masqueI1I2 is
++// the wiring entry point and assumes nothing has been validated yet — it calls
++// masqueI1 first and only fills i2 when that succeeds.
++func masqueI1I2(o option.AmneziaWGOptions) (i1, i2 string, err error) {
++	i1, err = masqueI1(o)
++	if err != nil || i1 == "" {
++		return i1, "", err
++	}
++	proto := strings.ToLower(strings.TrimSpace(o.Ip))
++	domain := strings.TrimSpace(o.Id)
++	switch proto {
++	case masqueProtoSIP:
++		// Build ONE dialog and emit both messages from it: i1 = INVITE, i2 = the
++		// matching 100 Trying. They share Via branch / From tag / Call-ID / CSeq,
++		// so they read as one SIP dialog. i1 is rebuilt here (replacing masqueI1's
++		// independent INVITE) so both slots come from this single dialog.
++		d := newSIPDialog(domain)
++		invite, err := masqueSIPInviteCPS(d)
++		if err != nil {
++			return "", "", err
++		}
++		trying, err := masqueSIPTryingCPS(d)
++		if err != nil {
++			return "", "", err
++		}
++		i1, i2 = invite, trying
++	}
++	return i1, i2, nil
++}
++
++// validateMasqueDomain enforces a strict LDH (letter-digit-hyphen) hostname,
++// mirroring WireSock's quic_handshake.rs::is_valid_sni_hostname. This is a
++// SECURITY boundary, not cosmetics: the domain is interpolated into SIP header
++// text, encoded into a DNS QNAME, and placed in the QUIC ClientHello SNI
++// (server_name) extension, so control bytes (\r \n \0 \t) or SIP/URI
++// metacharacters (> ; @ " space) would allow header injection / label
++// corruption. Only ASCII alphanumerics, '-' and '_' are allowed; '_' is
++// permitted because it is legal in DNS QNAMEs (service labels) and cannot break
++// SIP framing.
++//
++// Rules (per label, split on '.'): non-empty, ≤63 bytes, no leading/trailing
++// '-'; whole name non-empty, ≤253 bytes, no leading/trailing '.' (one trailing
++// dot is tolerated and trimmed before checks, as a fully-qualified name).
++func validateMasqueDomain(domain string) error {
++	if domain == "" {
++		return E.New("amneziawg: id (masquerade domain) is required when ip/ib is set")
++	}
++	// Tolerate a single trailing dot (fully-qualified form) before validation.
++	name := strings.TrimSuffix(domain, ".")
++	if name == "" || len(name) > 253 {
++		return E.New("amneziawg: invalid masquerade domain ", strconv.Quote(domain), ": empty or longer than 253 bytes")
++	}
++	if strings.HasPrefix(name, ".") {
++		return E.New("amneziawg: invalid masquerade domain ", strconv.Quote(domain), ": leading dot")
++	}
++	for _, label := range strings.Split(name, ".") {
++		if label == "" {
++			return E.New("amneziawg: invalid masquerade domain ", strconv.Quote(domain), ": empty label")
++		}
++		if len(label) > 63 {
++			return E.New("amneziawg: invalid masquerade domain ", strconv.Quote(domain), ": label longer than 63 bytes")
++		}
++		if label[0] == '-' || label[len(label)-1] == '-' {
++			return E.New("amneziawg: invalid masquerade domain ", strconv.Quote(domain), ": label with leading/trailing hyphen")
++		}
++		for i := 0; i < len(label); i++ {
++			c := label[i]
++			ok := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
++				(c >= '0' && c <= '9') || c == '-' || c == '_'
++			if !ok {
++				return E.New("amneziawg: invalid masquerade domain ", strconv.Quote(domain), ": illegal character (only a-z A-Z 0-9 - _ allowed)")
++			}
++		}
++	}
++	return nil
++}
++
++// masqueBrowser identifiers (option.AmneziaWGOptions.Ib).
++const (
++	masqueBrowserChrome  = "chrome"
++	masqueBrowserFirefox = "firefox"
++	masqueBrowserCurl    = "curl"
++)
++
++// normalizeMasqueBrowser validates Ib against the accepted set and returns it
++// lower-cased, or "" when unset.
++//
++// Note: the QUIC masquerade emits a fragmented QUIC Initial with a real
++// ClientHello (see quic_initial_awg.go), but the DPI bypass works on
++// out-of-order CRYPTO-frame fragmentation, not on a TLS fingerprint, so no
++// specific browser JA3/JA4 is imitated. Ib is accepted for syntax compatibility
++// with WireSock configs and validated, but currently does not change the
++// generated ClientHello. For dns/stun/sip it has no effect; ib is only
++// meaningful (and even then only as a future hook) for ip=quic.
++func normalizeMasqueBrowser(ib, proto string) (string, error) {
++	browser := strings.ToLower(strings.TrimSpace(ib))
++	if browser == "" {
++		return "", nil
++	}
++	switch browser {
++	case masqueBrowserChrome, masqueBrowserFirefox, masqueBrowserCurl:
++	default:
++		return "", E.New("amneziawg: unknown masquerade browser ", strconv.Quote(ib), "; one of chrome|firefox|curl")
++	}
++	if proto != masqueProtoQUIC {
++		return "", E.New("amneziawg: ib (browser) is only meaningful with ip=quic, got ip=", strconv.Quote(proto))
++	}
++	return browser, nil
++}
++
++// ---------------------------------------------------------------------------
++// CPS skeleton builder
++// ---------------------------------------------------------------------------
++
++// cpsBuilder accumulates an AmneziaWG CPS spec. Static bytes are emitted as a
++// single <b 0xHEX> tag; entropy as <r N>. Tags are space-separated so the
++// vendored newObfChain (which scans for <...> tokens and ignores text between
++// them) parses them unambiguously.
++type cpsBuilder struct {
++	parts []string
++}
++
++// addBytes appends a <b 0xHEX> static-bytes tag. No-op for an empty slice
++// (newBytesObf rejects an empty argument).
++func (c *cpsBuilder) addBytes(b []byte) {
++	if len(b) == 0 {
++		return
++	}
++	c.parts = append(c.parts, "<b 0x"+hex.EncodeToString(b)+">")
++}
++
++// addRand appends a <r N> tag: N cryptographically-random bytes filled by the
++// engine at obfuscation time. No-op for n <= 0.
++func (c *cpsBuilder) addRand(n int) {
++	if n <= 0 {
++		return
++	}
++	c.parts = append(c.parts, fmt.Sprintf("<r %d>", n))
++}
++
++// addRandChars appends a <rc N> tag: N random ASCII letters ([a-zA-Z]). Used
++// for token/value fields that must be printable text (SIP tokens, STUN
++// SOFTWARE). No-op for n <= 0.
++func (c *cpsBuilder) addRandChars(n int) {
++	if n <= 0 {
++		return
++	}
++	c.parts = append(c.parts, fmt.Sprintf("<rc %d>", n))
++}
++
++// addRandDigits appends a <rd N> tag: N random ASCII digits ([0-9]). Used for
++// numeric token fields (SIP CSeq). No-op for n <= 0.
++func (c *cpsBuilder) addRandDigits(n int) {
++	if n <= 0 {
++		return
++	}
++	c.parts = append(c.parts, fmt.Sprintf("<rd %d>", n))
++}
++
++func (c *cpsBuilder) String() string {
++	return strings.Join(c.parts, "")
++}
++
++// ---------------------------------------------------------------------------
++// DNS — EDNS OPT query (a client-initiated lookup; direction-corrected)
++// ---------------------------------------------------------------------------
++//
++// Device status. ip=dns emits a DNS QUERY (QR=0) — what a client legitimately
++// sends first, fixing the wrong-direction anomaly of the earlier QR=1 response
++// (a response sent unsolicited as the first packet is a server-role packet in
++// the client's slot; the STUN profile had the same defect). But the decoy still
++// goes to the WARP endpoint (a datacenter Cloudflare IP on UDP/2408), which is
++// NOT a resolver — raw DNS lives on :53. On the LTE/WARP DPI this feature targets,
++// STUN was blocked as a protocol CLASS toward that destination regardless of
++// packet quality, and a DNS query is expected to behave the same (the
++// destination, not the direction, is the likely blocker). This profile is NOT
++// device-confirmed for WARP — use ip=quic for WARP. ip=dns is kept for other
++// providers whose DPI only checks well-formedness, not protocol-to-destination.
++//
++// Layout (one well-formed DNS query, no trailing bytes):
++//
++//	[ Header 12 ][ Question (QNAME + HTTPS + IN) ][ OPT RR 11 ][ opt hdr 4 ][ cover ]
++//
++// TXID is <r 2> (fresh per packet, like a stub resolver). RDLENGTH covers the
++// option header + option-data; OPTION-LENGTH covers just the cover bytes.
++
++const (
++	// EDNS OPT advertised UDP payload size (modern resolver default, RFC 6891).
++	dnsOptUDPSize uint16 = 1232
++	// EDNS option code for the opaque cover payload. 0xFDE9 (65001) is in the
++	// IANA local/experimental range (RFC 6891 §6.1.2): resolvers must ignore
++	// unknown options, so it carries opaque cover bytes without the zero-content
++	// expectation of option code 12 (Padding, RFC 7830).
++	dnsOptCoverCode uint16 = 0xFDE9
++	// Number of opaque cover bytes (the encrypted-looking OPT option-data). The
++	// standalone decoy has no real ciphertext tail, so we emit a fixed-size
++	// random body to give the message a realistic size.
++	dnsCoverLen = 40
++	// QTYPE HTTPS (RR type 65, RFC 9460): the most common query a modern browser
++	// emits per navigation — the most "expected" query shape on the wire.
++	dnsQTypeHTTPS uint16 = 0x0041
++)
++
++// masqueDNSQueryCPS builds an EDNS-OPT DNS query (QR=0) for the configured
++// domain (QNAME), carrying the cover bytes as the opaque option-data of a single
++// unknown EDNS option (code 0xFDE9) in the Additional section — the normal EDNS
++// query shape. The whole datagram parses as one well-formed DNS message with no
++// trailing bytes.
++func masqueDNSQueryCPS(domain string) (string, error) {
++	qname, err := encodeDNSName(domain)
++	if err != nil {
++		return "", err
++	}
++
++	// Question section after QNAME: QTYPE HTTPS (0x0041) + QCLASS IN (0x0001).
++	qtHi, qtLo := be16(dnsQTypeHTTPS)
++	question := make([]byte, 0, len(qname)+4)
++	question = append(question, qname...)
++	question = append(question, qtHi, qtLo, 0x00, 0x01)
++
++	const optOptionHdrLen = 4 // OPTION-CODE(2)+OPTION-LENGTH(2)
++
++	// OPTION-LENGTH covers the cover bytes; RDLENGTH covers option header + data.
++	optLen := uint16(dnsCoverLen)
++	rdLength := uint16(optOptionHdrLen + dnsCoverLen)
++
++	var hdr cpsBuilder
++
++	// Header (12 B). TXID is emitted as <r 2> separately; the remaining 10 bytes
++	// are the static flags + section counts.
++	hdr.addRand(2) // TXID
++	hdr.addBytes([]byte{
++		0x01, 0x00, // QR=0 (query), opcode=0, AA=0, TC=0, RD=1 | RA=0, Z=0, RCODE=0
++		0x00, 0x01, // QDCOUNT = 1
++		0x00, 0x00, // ANCOUNT = 0
++		0x00, 0x00, // NSCOUNT = 0
++		0x00, 0x01, // ARCOUNT = 1 (the OPT RR)
++	})
++
++	// Question section.
++	hdr.addBytes(question)
++
++	// OPT RR fixed prefix (11) + option header (4).
++	udpHi, udpLo := be16(dnsOptUDPSize)
++	rdHi, rdLo := be16(rdLength)
++	ocHi, ocLo := be16(dnsOptCoverCode)
++	olHi, olLo := be16(optLen)
++	opt := []byte{
++		0x00,       // NAME: root label (OPT must use the root name)
++		0x00, 0x29, // TYPE = OPT (41)
++		udpHi, udpLo, // CLASS = requestor UDP size (1232)
++		0x00, 0x00, 0x00, 0x00, // TTL: ext-RCODE 0, EDNS version 0, flags 0 (DO=0)
++		rdHi, rdLo, // RDLENGTH = option header + option-data
++		ocHi, ocLo, // OPTION-CODE = 0xFDE9 (unknown)
++		olHi, olLo, // OPTION-LENGTH = cover bytes
++	}
++	hdr.addBytes(opt)
++
++	// Opaque cover bytes (the "encrypted" OPT option-data).
++	hdr.addRand(dnsCoverLen)
++
++	return hdr.String(), nil
++}
++
++// encodeDNSName encodes an LDH hostname into DNS wire format (length-prefixed
++// labels terminated by a root label). The domain is already validated by
++// validateMasqueDomain, so every label is 1..63 bytes of LDH+underscore; this
++// re-checks the bound defensively (a label length must fit one byte).
++func encodeDNSName(domain string) ([]byte, error) {
++	name := strings.TrimSuffix(domain, ".")
++	labels := strings.Split(name, ".")
++	out := make([]byte, 0, len(name)+2)
++	for _, label := range labels {
++		if len(label) == 0 || len(label) > 63 {
++			return nil, E.New("amneziawg: cannot encode DNS label ", strconv.Quote(label))
++		}
++		out = append(out, byte(len(label)))
++		out = append(out, label...)
++	}
++	out = append(out, 0x00) // root label terminator
++	return out, nil
++}
++
++// ---------------------------------------------------------------------------
++// STUN — magic cookie constant (the Binding Request generator lives in
++// stun_request_awg.go; the old Binding Success Response decoy was replaced — a
++// response sent as the client's first packet is a wrong-direction anomaly).
++// ---------------------------------------------------------------------------
++
++// stunMagicCookie is the RFC 5389 magic cookie.
++const stunMagicCookie uint32 = 0x2112A442
++
++// be16 splits a uint16 into big-endian (hi, lo) bytes. Used so multi-byte
++// header fields can be written into a []byte literal without per-field
++// constant-overflow conversions.
++func be16(v uint16) (hi, lo byte) {
++	return byte(v >> 8), byte(v & 0xFF)
++}
++
++// ---------------------------------------------------------------------------
++// SIP — the INVITE request generator lives in sip_invite_awg.go (a `200 OK`
++// response sent as the client's first packet was a wrong-direction anomaly,
++// like the old STUN/DNS profiles; an INVITE is what a client sends first).
++// ---------------------------------------------------------------------------
+diff --git a/transport/wireguard/pseudo_gen_awg.go b/transport/wireguard/pseudo_gen_awg.go
+new file mode 100644
+index 0000000..fc35c56
+--- /dev/null
++++ b/transport/wireguard/pseudo_gen_awg.go
+@@ -0,0 +1,204 @@
++//go:build with_awg
++
++// Pseudo names / hosts / public IPs for masquerade decoys.
++//
++// Purpose — plausibility WITHOUT recognizability. A junk decoy (e.g. the SIP
++// INVITE template) needs pronounceable user/host strings that are NOT hardcoded
++// RFC beacons (`bob@biloxi.com` is a public marker a DPI knows), not obvious
++// garbage (`7f3a9c`), and not private IPs (which give the forgery away).
++//
++// Each value is drawn from crypto/rand (not seeded → no cross-user signature).
++// This is not cryptographic (it's junk, not a secret); crypto/rand is used only
++// so the sequence is unpredictable between users.
++//
++// Ported from the LxBox-side PseudoGen (§127).
++package wireguard
++
++import (
++	"crypto/rand"
++	"math/big"
++	"strings"
++)
++
++// consonants without q/x/y (unpronounceable combos).
++var pgCons = []string{
++	"b", "c", "d", "f", "g", "h", "j", "k", "l", "m",
++	"n", "p", "r", "s", "t", "v", "w", "z",
++}
++
++var pgVow = []string{"a", "e", "i", "o", "u"}
++
++// onset clusters (before a vowel) — pronounceable syllable onsets.
++var pgOnset = []string{
++	"br", "tr", "cr", "dr", "fr", "gr", "pr", "st", "sp", "sk",
++	"sl", "sm", "sn", "bl", "cl", "fl", "gl", "pl", "tw", "sh",
++}
++
++// coda clusters (after a vowel, word-final) — pronounceable codas:
++// silk/bank/song. "lk" is coda-only, never an onset.
++var pgCoda = []string{
++	"lk", "sk", "st", "nk", "sh", "nt", "rk", "ng",
++}
++
++var pgTLD = []string{"com", "net", "org", "io", "co"}
++
++// pgIntn returns a uniform int in [0, n) from crypto/rand (panics only on a
++// broken RNG, which is unrecoverable anyway).
++func pgIntn(n int) int {
++	if n <= 1 {
++		return 0
++	}
++	v, err := rand.Int(rand.Reader, big.NewInt(int64(n)))
++	if err != nil {
++		panic("amneziawg: crypto/rand failed in PseudoGen")
++	}
++	return int(v.Int64())
++}
++
++func pgPick(seq []string) string { return seq[pgIntn(len(seq))] }
++
++// pgChance reports true with probability pct%.
++func pgChance(pct int) bool { return pgIntn(100) < pct }
++
++// pgWord builds a pronounceable syllabic word (looks like a real name):
++//
++//	word = C + V + [ (60%: C | 40%: ONSET) + V ] × {2..3} + (50%: tail)
++//	tail = 30%: CODA | 70%: C
++func pgWord() string {
++	var b strings.Builder
++	b.WriteString(pgPick(pgCons)) // C
++	b.WriteString(pgPick(pgVow))  // V
++	blocks := 2 + pgIntn(2)       // 2..3
++	for i := 0; i < blocks; i++ {
++		if pgChance(60) {
++			b.WriteString(pgPick(pgCons))
++		} else {
++			b.WriteString(pgPick(pgOnset))
++		}
++		b.WriteString(pgPick(pgVow)) // V
++	}
++	if pgChance(50) {
++		if pgChance(30) {
++			b.WriteString(pgPick(pgCoda))
++		} else {
++			b.WriteString(pgPick(pgCons))
++		}
++	}
++	return b.String()
++}
++
++// pgUser returns a pseudo-username: a word, 30% of the time joined as word_word.
++func pgUser() string {
++	u := pgWord()
++	if pgChance(30) {
++		return u + "_" + pgWord()
++	}
++	return u
++}
++
++// pgHex returns n lowercase hex characters from crypto/rand. Used for SIP
++// dialog tokens (Via branch suffix, Call-ID local part) that must be IDENTICAL
++// across the INVITE (i1) and its 100 Trying (i2) — so they are generated once
++// and baked into the static <b> bytes of both halves, not emitted per-packet
++// via <rc> (which would differ between the two slots and break dialog identity).
++func pgHex(n int) string {
++	const hexDigits = "0123456789abcdef"
++	var b strings.Builder
++	b.Grow(n)
++	for i := 0; i < n; i++ {
++		b.WriteByte(hexDigits[pgIntn(16)])
++	}
++	return b.String()
++}
++
++// pgDigits returns n decimal digits from crypto/rand, with no leading zero (so
++// it reads as a natural number — From tag, CSeq sequence). Like pgHex, used for
++// dialog tokens shared verbatim between i1 and i2.
++func pgDigits(n int) string {
++	if n <= 0 {
++		return ""
++	}
++	var b strings.Builder
++	b.Grow(n)
++	b.WriteByte(byte('1' + pgIntn(9))) // first digit 1..9 (no leading zero)
++	for i := 1; i < n; i++ {
++		b.WriteByte(byte('0' + pgIntn(10)))
++	}
++	return b.String()
++}
++
++// pgIsReservedIP reports whether a.b.x.x is reserved/private (unfit as a public
++// VoIP host — it would expose the forgery).
++func pgIsReservedIP(a, b int) bool {
++	switch {
++	case a == 0 || a == 10 || a == 127:
++		return true
++	case a == 172 && b >= 16 && b <= 31:
++		return true
++	case a == 192 && b == 168:
++		return true
++	case a == 169 && b == 254:
++		return true
++	case a == 100 && b >= 64 && b <= 127: // CGNAT
++		return true
++	case a >= 224: // multicast/reserved
++		return true
++	}
++	return false
++}
++
++// pgPublicIP returns a public IPv4 (private/reserved ranges excluded).
++func pgPublicIP() string {
++	for {
++		a := 1 + pgIntn(223) // 1..223
++		b := pgIntn(256)
++		if pgIsReservedIP(a, b) {
++			continue
++		}
++		c := pgIntn(256)
++		d := 1 + pgIntn(254) // 1..254
++		return itoa(a) + "." + itoa(b) + "." + itoa(c) + "." + itoa(d)
++	}
++}
++
++// pgHost returns a pseudo SIP host: a 2-/3-level domain, sip subdomain, or a
++// public IP. Shares: 30% 3-level / 30% public IP / 30% 2-level / 10% sip-sub.
++func pgHost() string {
++	switch r := pgIntn(100); {
++	case r < 30:
++		return pgWord() + "." + pgWord() + "." + pgPick(pgTLD) // 3-level
++	case r < 60:
++		return pgPublicIP() // IP
++	case r < 90:
++		return pgWord() + "." + pgPick(pgTLD) // 2-level
++	default:
++		return "sip." + pgWord() + "." + pgPick(pgTLD) // sip subdomain
++	}
++}
++
++// pgDomainHost returns a pseudo DOMAIN name only — a 2-/3-level LDH hostname,
++// never an IP or a sip-prefixed subdomain. Used as a DNS QNAME when no id is
++// given: a query for a bare IP or a "sip." name would be implausible, whereas a
++// plain domain lookup is the normal case. 60% 3-level / 40% 2-level.
++func pgDomainHost() string {
++	if pgIntn(100) < 60 {
++		return pgWord() + "." + pgWord() + "." + pgPick(pgTLD) // 3-level
++	}
++	return pgWord() + "." + pgPick(pgTLD) // 2-level
++}
++
++// itoa is a tiny non-allocating-ish base-10 itoa for the IP octets (avoids a
++// strconv import for three call sites).
++func itoa(n int) string {
++	if n == 0 {
++		return "0"
++	}
++	var buf [3]byte
++	i := len(buf)
++	for n > 0 {
++		i--
++		buf[i] = byte('0' + n%10)
++		n /= 10
++	}
++	return string(buf[i:])
++}
+diff --git a/transport/wireguard/quic_clienthello_awg.go b/transport/wireguard/quic_clienthello_awg.go
+new file mode 100644
+index 0000000..7eaf527
+--- /dev/null
++++ b/transport/wireguard/quic_clienthello_awg.go
+@@ -0,0 +1,228 @@
++//go:build with_awg
++
++// TLS 1.3 ClientHello builder for the QUIC Initial masquerade (009, ip=quic).
++//
++// This emits a realistic browser-shaped ClientHello (~294 bytes), NOT a bare
++// SNI-only stub. The realism is load-bearing for the DPI bypass: the decoy must
++// look like a genuine QUIC client's first flight (non-empty cipher_suites,
++// key_share, ALPN "h3", quic_transport_params, supported_versions TLS1.3) so
++// that when a DPI does reassemble or partially parse it, it classifies the flow
++// as "QUIC to a CDN" rather than something to fingerprint. The exact extension
++// set/order is not byte-critical — what matters is that the required extensions
++// are present and the total length lands near the etalon so the fragment
++// cutpoints stay valid.
++//
++// We do not imitate a specific JA3/JA4 fingerprint: the bypass works on
++// CRYPTO-frame fragmentation, not on TLS fingerprint, so a plausible generic
++// ClientHello suffices.
++package wireguard
++
++import (
++	"encoding/binary"
++
++	E "github.com/sagernet/sing/common/exceptions"
++)
++
++// quicCHTargetLen is the target ClientHello length (handshake header included).
++// The etalon is 294 bytes; we pad with a padding extension to hit this so the
++// etalonCutpoints (last = 290) always yield non-empty fragments. A long SNI can
++// push the CH past this, which is fine (see buildClientHello); a short SNI is
++// padded up to it.
++const quicCHTargetLen = 294
++
++// quicCHMinLen is the minimum ClientHello length that still fragments at the
++// etalon cutpoints (last cutpoint 290 ⇒ the final fragment needs ≥1 byte).
++const quicCHMinLen = 291
++
++// appendVec16 appends a 16-bit-length-prefixed vector: u16(len(body)) ‖ body.
++func appendVec16(dst, body []byte) []byte {
++	dst = binary.BigEndian.AppendUint16(dst, uint16(len(body)))
++	return append(dst, body...)
++}
++
++// appendExtension appends a TLS extension: u16(type) ‖ u16(len(data)) ‖ data.
++func appendExtension(dst []byte, extType uint16, data []byte) []byte {
++	dst = binary.BigEndian.AppendUint16(dst, extType)
++	dst = binary.BigEndian.AppendUint16(dst, uint16(len(data)))
++	return append(dst, data...)
++}
++
++// buildClientHello produces the ClientHello bytes for the QUIC Initial. The
++// browser hint (Ib) selects how it is built:
++//
++//   - "" or "curl" → buildGenericClientHello: our own ~294-byte device-proven CH
++//     (the default that passed the real LTE/WARP DPI; uTLS has no curl-QUIC fp).
++//   - "chrome"/"firefox" → buildBrowserClientHello (uTLS, with_utls builds only):
++//     a real browser QUIC ClientHello with that browser's genuine JA3/JA4. Bigger
++//     (~530–630B), so the fragment plan cuts it differently — see buildInitialPacket.
++//     Without the with_utls tag it falls back to the generic CH (see the stub file).
++//
++// The uTLS path needs neither tlsRandom nor x25519Pub (uTLS makes its own fresh
++// random and key_share), so those are used only by the generic path.
++func buildClientHello(sni string, tlsRandom [32]byte, x25519Pub []byte, browser string) ([]byte, error) {
++	switch browser {
++	case masqueBrowserChrome, masqueBrowserFirefox:
++		return buildBrowserClientHello(sni, browser)
++	default: // "" or "curl"
++		return buildGenericClientHello(sni, tlsRandom, x25519Pub)
++	}
++}
++
++// buildGenericClientHello assembles our own TLS 1.3 ClientHello for the given
++// SNI (~294 bytes, padded to the etalon), using the supplied 32-byte TLS random
++// and 32-byte x25519 public key. This is the device-proven default; it does not
++// imitate a specific browser JA3 (the bypass works on fragmentation, not on a
++// TLS fingerprint).
++//
++// Layout (RFC 8446 §4.1.2, wrapped as a handshake message):
++//
++//	handshake_type = 0x01 (ClientHello)
++//	length         = u24
++//	legacy_version = 0x0303
++//	random         = 32 bytes
++//	session_id     = empty (len 0)
++//	cipher_suites  = [0x1301] (TLS_AES_128_GCM_SHA256) — non-empty (I-required)
++//	compression    = null (0x00)
++//	extensions     = supported_groups, signature_algorithms, server_name(SNI),
++//	                 key_share(x25519), quic_transport_params, GREASE,
++//	                 psk_key_exchange_modes, ALPN(h3), compress_certificate,
++//	                 supported_versions(TLS1.3), padding(to target length)
++func buildGenericClientHello(sni string, tlsRandom [32]byte, x25519Pub []byte) ([]byte, error) {
++	if sni == "" {
++		return nil, E.New("amneziawg: ip=quic requires a non-empty id (SNI) for the ClientHello")
++	}
++	if len(x25519Pub) != 32 {
++		return nil, E.New("amneziawg: x25519 public key must be 32 bytes")
++	}
++
++	// --- extensions -------------------------------------------------------
++	var exts []byte
++
++	// supported_groups (0x000a): x25519 (0x001d). NamedGroupList is a u16-vec.
++	exts = appendExtension(exts, 0x000a, appendVec16(nil, []byte{0x00, 0x1d}))
++
++	// signature_algorithms (0x000d): a small plausible list (u16-vec of u16s).
++	sigAlgs := []byte{
++		0x04, 0x03, // ecdsa_secp256r1_sha256
++		0x08, 0x04, // rsa_pss_rsae_sha256
++		0x04, 0x01, // rsa_pkcs1_sha256
++		0x08, 0x05, // rsa_pss_rsae_sha384
++		0x05, 0x01, // rsa_pkcs1_sha384
++		0x08, 0x06, // rsa_pss_rsae_sha512
++		0x06, 0x01, // rsa_pkcs1_sha512
++		0x02, 0x01, // rsa_pkcs1_sha1
++	}
++	exts = appendExtension(exts, 0x000d, appendVec16(nil, sigAlgs))
++
++	// server_name (0x0000): ServerNameList = u16-vec of { name_type(0) ‖ u16-vec(host) }.
++	var sniEntry []byte
++	sniEntry = append(sniEntry, 0x00) // name_type = host_name
++	sniEntry = appendVec16(sniEntry, []byte(sni))
++	exts = appendExtension(exts, 0x0000, appendVec16(nil, sniEntry))
++
++	// key_share (0x0033): KeyShareClientHello = u16-vec of { group(u16) ‖ u16-vec(key) }.
++	var ks []byte
++	ks = binary.BigEndian.AppendUint16(ks, 0x001d) // x25519
++	ks = appendVec16(ks, x25519Pub)
++	exts = appendExtension(exts, 0x0033, appendVec16(nil, ks))
++
++	// quic_transport_params (0x0039): opaque plausible filler. The decoy never
++	// completes a handshake, and DPI does not parse these; the byte content is
++	// not validated, only the presence + plausible length matters.
++	// Each param is varint(id) ‖ varint(len) ‖ value; we emit a few common ones.
++	qtp := buildQUICTransportParams()
++	exts = appendExtension(exts, 0x0039, qtp)
++
++	// GREASE (0x0a0a, an RFC 8701 GREASE extension value): short opaque body.
++	// Real clients send GREASE; a server/DPI that recognises GREASE codepoints
++	// ignores it, which is exactly the "looks like a real client" effect we want.
++	exts = appendExtension(exts, 0x0a0a, []byte{0x00, 0x00, 0x00})
++
++	// psk_key_exchange_modes (0x002d): u8-vec { psk_dhe_ke(0x01) }.
++	exts = appendExtension(exts, 0x002d, []byte{0x01, 0x01})
++
++	// ALPN (0x0010): ProtocolNameList = u16-vec of { u8-vec("h3") }.
++	var alpn []byte
++	alpn = append(alpn, 0x02, 'h', '3') // u8-len(2) ‖ "h3"
++	exts = appendExtension(exts, 0x0010, appendVec16(nil, alpn))
++
++	// compress_certificate (0x001b): u8-vec of u16 algorithms { brotli(0x0002) }.
++	exts = appendExtension(exts, 0x001b, []byte{0x02, 0x00, 0x02})
++
++	// supported_versions (0x002b): u8-vec of u16 { TLS1.3(0x0304) }.
++	exts = appendExtension(exts, 0x002b, []byte{0x02, 0x03, 0x04})
++
++	// --- ClientHello body (before the handshake header) -------------------
++	var body []byte
++	body = append(body, 0x03, 0x03)              // legacy_version TLS1.2
++	body = append(body, tlsRandom[:]...)         // 32-byte random
++	body = append(body, 0x00)                    // session_id length 0
++	body = appendVec16(body, []byte{0x13, 0x01}) // cipher_suites: TLS_AES_128_GCM_SHA256
++	body = append(body, 0x01, 0x00)              // compression_methods: len 1, null
++
++	// padding (0x0015): zero-filled, sized so the total handshake message reaches
++	// AT LEAST quicCHTargetLen. The SNI is interpolated 1:1 into server_name, so a
++	// long (but valid, ≤253-byte) domain can already exceed the etalon length
++	// before any padding — in that case we add zero padding and let the CH be
++	// naturally longer. The fragment plan (etalonCutpoints, last=290) only needs
++	// len(ch) > 290, and a longer CH keeps I1–I4 (the final fragment just runs
++	// longer); the device-proven geometry is preserved for typical short domains.
++	// Compute the slack accounting for the extensions block length prefix (u16)
++	// and the padding extension's own 4-byte header.
++	const handshakeHdr = 4 // type(1) + length(3)
++	const extsLenPrefix = 2
++	const padExtHdr = 4
++	current := handshakeHdr + len(body) + extsLenPrefix + len(exts)
++	pad := quicCHTargetLen - current - padExtHdr
++	if pad < 0 {
++		pad = 0 // already at/over target — a long SNI; emit a 0-length padding ext
++	}
++	exts = appendExtension(exts, 0x0015, make([]byte, pad))
++
++	// extensions block (u16-length-prefixed) appended to the body.
++	body = appendVec16(body, exts)
++
++	// --- wrap as a handshake message --------------------------------------
++	out := make([]byte, 0, handshakeHdr+len(body))
++	out = append(out, 0x01) // ClientHello
++	out = append(out, byte(len(body)>>16), byte(len(body)>>8), byte(len(body)))
++	out = append(out, body...)
++
++	// Must be at least the etalon length so the offset cutpoints (last 290) yield
++	// non-empty fragments; for short SNIs padding pins it exactly to the target.
++	if len(out) < quicCHMinLen {
++		return nil, E.New("amneziawg: ClientHello assembled shorter than the minimum fragmentable length")
++	}
++	return out, nil
++}
++
++// buildQUICTransportParams returns an opaque-but-plausible quic_transport_params
++// extension body: a handful of common parameters with sane values.
++// Not semantically validated by the decoy; present for realism only.
++func buildQUICTransportParams() []byte {
++	var p []byte
++	appendParam := func(id uint64, value []byte) {
++		p = appendQUICVarint(p, id)
++		p = appendQUICVarint(p, uint64(len(value)))
++		p = append(p, value...)
++	}
++	// 0x01 max_idle_timeout = 30000 ms (varint).
++	appendParam(0x01, appendQUICVarint(nil, 30000))
++	// 0x04 initial_max_data = 0x00c00000.
++	appendParam(0x04, appendQUICVarint(nil, 0x00c00000))
++	// 0x05 initial_max_stream_data_bidi_local = 0x00100000.
++	appendParam(0x05, appendQUICVarint(nil, 0x00100000))
++	// 0x06 initial_max_stream_data_bidi_remote = 0x00100000.
++	appendParam(0x06, appendQUICVarint(nil, 0x00100000))
++	// 0x07 initial_max_stream_data_uni = 0x00100000.
++	appendParam(0x07, appendQUICVarint(nil, 0x00100000))
++	// 0x08 initial_max_streams_bidi = 100.
++	appendParam(0x08, appendQUICVarint(nil, 100))
++	// 0x09 initial_max_streams_uni = 100.
++	appendParam(0x09, appendQUICVarint(nil, 100))
++	// 0x0e active_connection_id_limit = 8.
++	appendParam(0x0e, appendQUICVarint(nil, 8))
++	// 0x03 max_udp_payload_size = 1472.
++	appendParam(0x03, appendQUICVarint(nil, 1472))
++	return p
++}
+diff --git a/transport/wireguard/quic_clienthello_utls_awg.go b/transport/wireguard/quic_clienthello_utls_awg.go
+new file mode 100644
+index 0000000..faf67ed
+--- /dev/null
++++ b/transport/wireguard/quic_clienthello_utls_awg.go
+@@ -0,0 +1,117 @@
++//go:build with_awg && with_utls
++
++// Browser-fingerprinted ClientHello for ip=quic + ib=chrome|firefox, built with
++// uTLS (github.com/metacubex/utls) so the decoy carries a real browser's JA3/JA4
++// instead of our generic ClientHello. Only compiled with the with_utls tag; the
++// stub file handles the !with_utls case (falls back to the generic CH).
++//
++// We drive uTLS in QUIC mode (UQUICClient) so the emitted ClientHello is a QUIC
++// ClientHello — it carries quic_transport_params and we force ALPN h3, unlike a
++// TCP-TLS ClientHello. The post-quantum hybrid key_share (X25519MLKEM768) that a
++// 2024+ browser sends is ~1.2 KB and would not fit one QUIC Initial, so we strip
++// it (the reality client does the same) and pin a pre-PQ fingerprint version
++// (Chrome 120 / Firefox 120, ~550–620 B). Honest consequence: the JA3 matches a
++// late-2023 browser, not a current PQ-enabled one.
++//
++// NOTE: this is a forward-looking knob against a future JA3/JA4-classifying DPI.
++// On the DPI this feature targets, ip=quic already passes on fragmentation alone
++// (no fingerprint check), so the default ib="" keeps the device-proven generic
++// ~294 B ClientHello; ib=chrome/firefox opts into the larger uTLS one, whose
++// different size re-shapes the fragmentation and is not itself device-tested.
++package wireguard
++
++import (
++	"context"
++
++	utls "github.com/metacubex/utls"
++	"github.com/sagernet/sing/common"
++	E "github.com/sagernet/sing/common/exceptions"
++)
++
++// browserHelloID maps the ib hint to a uTLS fingerprint pinned to a pre-PQ
++// version (so the ClientHello fits a single QUIC Initial after PQ stripping).
++func browserHelloID(browser string) (utls.ClientHelloID, bool) {
++	switch browser {
++	case masqueBrowserChrome:
++		return utls.HelloChrome_120, true
++	case masqueBrowserFirefox:
++		return utls.HelloFirefox_120, true
++	default:
++		return utls.ClientHelloID{}, false
++	}
++}
++
++// buildBrowserClientHello returns the raw ClientHello bytes for a QUIC Initial
++// fingerprinted as the given browser, with ALPN forced to h3 and the PQ hybrid
++// key_share stripped so it fits one Initial. Falls back to the generic CH for an
++// unsupported browser (should not happen — the dispatcher only routes chrome/firefox).
++func buildBrowserClientHello(sni, browser string) ([]byte, error) {
++	id, ok := browserHelloID(browser)
++	if !ok {
++		return nil, E.New("amneziawg: no uTLS fingerprint for browser ", browser)
++	}
++
++	spec, err := utls.UTLSIdToSpec(id)
++	if err != nil {
++		return nil, E.Cause(err, "amneziawg: uTLS spec for ", browser)
++	}
++
++	// QUIC requires TLS 1.3 only; the parrot spec advertises 1.0–1.3 for TCP
++	// compatibility, which uTLS rejects in QUIC mode. Pin it to 1.3.
++	spec.TLSVersMin = utls.VersionTLS13
++	spec.TLSVersMax = utls.VersionTLS13
++	for _, ext := range spec.Extensions {
++		switch e := ext.(type) {
++		case *utls.ALPNExtension:
++			e.AlpnProtocols = []string{"h3"} // QUIC, not h2
++		case *utls.SupportedVersionsExtension:
++			e.Versions = []uint16{utls.VersionTLS13}
++		case *utls.SupportedCurvesExtension:
++			e.Curves = common.Filter(e.Curves, notPQCurve)
++		case *utls.KeyShareExtension:
++			e.KeyShares = common.Filter(e.KeyShares, func(k utls.KeyShare) bool { return notPQCurve(k.Group) })
++		}
++	}
++
++	cfg := &utls.Config{ServerName: sni, MinVersion: utls.VersionTLS13}
++	q := utls.UQUICClient(&utls.QUICConfig{TLSConfig: cfg}, utls.HelloCustom)
++	defer q.Close()
++	if err := q.ApplyPreset(&spec); err != nil {
++		return nil, E.Cause(err, "amneziawg: uTLS ApplyPreset")
++	}
++	// QUIC transport parameters are mandatory in the ClientHello; the decoy never
++	// negotiates, so an opaque plausible blob is enough (same intent as the
++	// generic CH's quic_transport_params).
++	q.SetTransportParameters(quicDecoyTransportParams())
++	if err := q.Start(context.Background()); err != nil {
++		return nil, E.Cause(err, "amneziawg: uTLS QUIC start")
++	}
++
++	// The Initial-level CRYPTO data uTLS wants to send IS the ClientHello.
++	var hello []byte
++	for {
++		ev := q.NextEvent()
++		if ev.Kind == utls.QUICNoEvent {
++			break
++		}
++		if ev.Kind == utls.QUICWriteData && ev.Level == utls.QUICEncryptionLevelInitial {
++			hello = append(hello, ev.Data...)
++		}
++	}
++	if len(hello) == 0 || hello[0] != 0x01 {
++		return nil, E.New("amneziawg: uTLS produced no ClientHello")
++	}
++	return hello, nil
++}
++
++// notPQCurve reports whether a curve is NOT a post-quantum hybrid (which we strip
++// to keep the ClientHello inside one QUIC Initial).
++func notPQCurve(c utls.CurveID) bool {
++	return c != utls.X25519MLKEM768 && c != utls.X25519Kyber768Draft00
++}
++
++// quicDecoyTransportParams returns an opaque plausible QUIC transport-parameters
++// blob for the decoy ClientHello (not negotiated; presence + plausibility only).
++func quicDecoyTransportParams() []byte {
++	return buildQUICTransportParams()
++}
+diff --git a/transport/wireguard/quic_clienthello_utls_stub_awg.go b/transport/wireguard/quic_clienthello_utls_stub_awg.go
+new file mode 100644
+index 0000000..0d22290
+--- /dev/null
++++ b/transport/wireguard/quic_clienthello_utls_stub_awg.go
+@@ -0,0 +1,30 @@
++//go:build with_awg && !with_utls
++
++// Fallback for ib=chrome|firefox when the build lacks the with_utls tag: there
++// is no uTLS to produce a real browser fingerprint, so we degrade gracefully to
++// the generic ClientHello (the same one ib="" uses). The ib hint is still
++// accepted and validated upstream; it simply has no effect without with_utls.
++// (LX_TAGS includes with_utls, so release builds take the real path in
++// quic_clienthello_utls_awg.go; this only covers a with_awg-without-with_utls build.)
++package wireguard
++
++import (
++	"crypto/ecdh"
++	"crypto/rand"
++)
++
++// buildBrowserClientHello (no-uTLS build) ignores the browser and returns the
++// generic ClientHello with fresh per-call random + ephemeral x25519, matching
++// what buildInitialPacket would have produced for ib="".
++func buildBrowserClientHello(sni, browser string) ([]byte, error) {
++	_ = browser
++	var tlsRandom [32]byte
++	if _, err := rand.Read(tlsRandom[:]); err != nil {
++		return nil, err
++	}
++	ecKey, err := ecdh.X25519().GenerateKey(rand.Reader)
++	if err != nil {
++		return nil, err
++	}
++	return buildGenericClientHello(sni, tlsRandom, ecKey.PublicKey().Bytes())
++}
+diff --git a/transport/wireguard/quic_crypto_awg.go b/transport/wireguard/quic_crypto_awg.go
+new file mode 100644
+index 0000000..b5916d6
+--- /dev/null
++++ b/transport/wireguard/quic_crypto_awg.go
+@@ -0,0 +1,105 @@
++//go:build with_awg
++
++// RFC 9001 §5 Initial-encryption primitives for the QUIC masquerade.
++//
++// These are mirrored BYTE-FOR-BYTE from the project's own QUIC TLS helpers in
++// common/sniff/internal/qtls/qtls.go. We cannot import that package directly —
++// it lives under common/sniff/internal/, so Go only permits imports from code
++// rooted at common/sniff/. Rather than relocate upstream's package, we keep a
++// local copy of just the three primitives the generator needs. Because the
++// encoding is identical to qtls (and to RFC 9001), the keys we derive match what
++// the sniffer in common/sniff/quic.go computes for the same DCID — which is what
++// lets that sniffer (and the test reverse-parser) decrypt our output.
++//
++// These are not "custom crypto": HKDF-Expand-Label is RFC 8446 §7.1 verbatim,
++// the salt is the RFC 9001 §5.2 QUIC v1 constant, and the AEAD is AES-128-GCM
++// with the TLS-1.3 XORed-nonce construction (RFC 8446 §5.3 / RFC 9001 §5.3).
++package wireguard
++
++import (
++	"crypto"
++	"crypto/aes"
++	"crypto/cipher"
++	"encoding/binary"
++
++	"golang.org/x/crypto/hkdf"
++)
++
++// quicVersion1 is the QUIC v1 version number (RFC 9000 §15).
++const quicVersion1 uint32 = 0x1
++
++// quicSaltV1 is the QUIC v1 Initial salt (RFC 9001 §5.2). Identical to
++// qtls.SaltV1.
++var quicSaltV1 = []byte{
++	0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17,
++	0x9a, 0xe6, 0xa4, 0xc8, 0x0c, 0xad, 0xcc, 0xbb, 0x7f, 0x0a,
++}
++
++// quicHKDFExpandLabel is HKDF-Expand-Label (RFC 8446 §7.1) with the "tls13 "
++// label prefix. Identical to qtls.HKDFExpandLabel.
++func quicHKDFExpandLabel(hash crypto.Hash, secret, context []byte, label string, length int) []byte {
++	b := make([]byte, 3, 3+6+len(label)+1+len(context))
++	binary.BigEndian.PutUint16(b, uint16(length))
++	b[2] = uint8(6 + len(label))
++	b = append(b, []byte("tls13 ")...)
++	b = append(b, []byte(label)...)
++	b = b[:3+6+len(label)+1]
++	b[3+6+len(label)] = uint8(len(context))
++	b = append(b, context...)
++	out := make([]byte, length)
++	n, err := hkdf.Expand(hash.New, secret, b).Read(out)
++	if err != nil || n != length {
++		panic("quic: HKDF-Expand-Label invocation failed unexpectedly")
++	}
++	return out
++}
++
++// quicAEADAESGCMTLS13 builds the TLS-1.3 AEAD (AES-128-GCM with a XORed nonce).
++// The 8-byte nonce passed to Seal/Open is XORed onto the low 8 bytes of the
++// 12-byte iv (nonceMask). Identical to qtls.AEADAESGCMTLS13.
++func quicAEADAESGCMTLS13(key, nonceMask []byte) cipher.AEAD {
++	if len(nonceMask) != 12 {
++		panic("tls: internal error: wrong nonce length")
++	}
++	block, err := aes.NewCipher(key)
++	if err != nil {
++		panic(err)
++	}
++	aead, err := cipher.NewGCM(block)
++	if err != nil {
++		panic(err)
++	}
++	ret := &quicXorNonceAEAD{aead: aead}
++	copy(ret.nonceMask[:], nonceMask)
++	return ret
++}
++
++type quicXorNonceAEAD struct {
++	nonceMask [12]byte
++	aead      cipher.AEAD
++}
++
++func (f *quicXorNonceAEAD) NonceSize() int { return 8 } // 64-bit sequence number
++func (f *quicXorNonceAEAD) Overhead() int  { return f.aead.Overhead() }
++
++func (f *quicXorNonceAEAD) Seal(out, nonce, plaintext, additionalData []byte) []byte {
++	for i, b := range nonce {
++		f.nonceMask[4+i] ^= b
++	}
++	result := f.aead.Seal(out, f.nonceMask[:], plaintext, additionalData)
++	for i, b := range nonce {
++		f.nonceMask[4+i] ^= b
++	}
++	return result
++}
++
++func (f *quicXorNonceAEAD) Open(out, nonce, ciphertext, additionalData []byte) ([]byte, error) {
++	for i, b := range nonce {
++		f.nonceMask[4+i] ^= b
++	}
++	result, err := f.aead.Open(out, f.nonceMask[:], ciphertext, additionalData)
++	for i, b := range nonce {
++		f.nonceMask[4+i] ^= b
++	}
++	return result, err
++}
+diff --git a/transport/wireguard/quic_initial_awg.go b/transport/wireguard/quic_initial_awg.go
+new file mode 100644
+index 0000000..805a86e
+--- /dev/null
++++ b/transport/wireguard/quic_initial_awg.go
+@@ -0,0 +1,580 @@
++//go:build with_awg
++
++// QUIC Initial masquerade generator — out-of-order fragmented ClientHello.
++//
++// This SUPERSEDES the earlier 1-RTT short-header decoy (the deleted
++// masqueQUICShortHeaderCPS / quicFirstByte). That decoy was structurally valid
++// QUIC but EMPIRICALLY BLOCKED by a real LTE-operator DPI: every short-header
++// variant timed out, while a full QUIC Initial whose ClientHello is split into
++// several out-of-order CRYPTO frames passed reliably (device-proven A/B, see
++// LxBox docs/spec/tasks/146-warp-quic-initial-fragmented-i1.md §2).
++//
++// WHY OUT-OF-ORDER WORKS (mechanism). A real QUIC server reassembles
++// CRYPTO frames by their offset before TLS parsing; a line-rate DPI does not
++// keep a reassembly buffer — it grabs the FIRST CRYPTO frame, assumes it starts
++// at offset 0, and parses TLS from there. When the first wire frame has
++// offset≠0 (the middle of the ClientHello), the DPI parses garbage, the TLS
++// record lengths do not add up, and it fails OPEN (Chrome legitimately
++// fragments large ClientHellos, so fail-closed would break real QUIC). The real
++// WARP server reorders the frames and the handshake would proceed; the DPI does
++// not. The i1 is a standalone decoy (src=nil, sent before the WG handshake — see
++// amneziawg-go send.go); it does not need to complete any TLS handshake, only to
++// make the first packet of the flow look like a legitimate QUIC start to a CDN.
++//
++// This deliberately reverses the short-header file's old rationale (a decoy
++// "cannot meet" the ≥1200-byte Initial minimum, and a short header "hides
++// better"): the device evidence shows the opposite on real DPI, and a padded
++// ≥1200-byte Initial is exactly what RFC 9000 §14.1 mandates anyway. Do NOT
++// "simplify" this back to a short header.
++//
++// Crypto is RFC 9001 §5 Initial encryption. The HKDF-Expand-Label, QUIC v1 salt
++// and AES-128-GCM-with-XORed-nonce AEAD live in quic_crypto_awg.go, mirrored
++// byte-for-byte from the project's QUIC sniffer helpers (common/sniff so the
++// derived keys are identical). The packet structure is the exact inverse of the
++// live QUIC sniffer in common/sniff/quic.go — which doubles as the reverse
++// parser the tests use to verify our own output (decrypt, frame-walk,
++// reassemble, SNI).
++package wireguard
++
++import (
++	"crypto"
++	"crypto/aes"
++	"crypto/ecdh"
++	"crypto/rand"
++	"encoding/binary"
++	"math/big"
++
++	E "github.com/sagernet/sing/common/exceptions"
++
++	"golang.org/x/crypto/hkdf"
++)
++
++// ---------------------------------------------------------------------------
++// RFC 9000 §16 variable-length integer ENCODER.
++//
++// qtls.ReadUvarint is decode-only; we need the encoder for CRYPTO offset/length
++// and the Initial length field. Two-bit length prefix: 00→1 byte (<2^6),
++// 01→2 bytes (<2^14), 10→4 bytes (<2^30), 11→8 bytes (<2^62).
++// ---------------------------------------------------------------------------
++
++func appendQUICVarint(dst []byte, v uint64) []byte {
++	switch {
++	case v < 1<<6:
++		return append(dst, byte(v))
++	case v < 1<<14:
++		return append(dst, byte(v>>8)|0x40, byte(v))
++	case v < 1<<30:
++		return append(dst,
++			byte(v>>24)|0x80, byte(v>>16), byte(v>>8), byte(v))
++	default:
++		return append(dst,
++			byte(v>>56)|0xc0, byte(v>>48), byte(v>>40), byte(v>>32),
++			byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
++	}
++}
++
++// ---------------------------------------------------------------------------
++// QUIC Initial geometry (device-proven etalon).
++// ---------------------------------------------------------------------------
++
++const (
++	quicInitialTotalLen = 1250 // total datagram size (padded ≥1200, RFC 9000 §14.1)
++	quicInitialLenField = 1232 // varint "length" = pn_len + payload + tag (0x44d0)
++	quicPacketNumberLen = 1    // packet number length in bytes (pn_len=1)
++	quicAEADTagLen      = 16   // AES-128-GCM authentication tag
++	quicDCIDLen         = 8    // Destination Connection ID length (fresh per call)
++)
++
++// ---------------------------------------------------------------------------
++// CRYPTO fragment plan (wire order). The OUT-OF-ORDER wire layout is the whole
++// DPI bypass: the first emitted CRYPTO frame is offset≠0, the offset-0 frame is
++// emitted near the end, PING/PADDING are interleaved between CRYPTO frames.
++//
++// Invariants (I1–I4), enforced by buildInitialPayload + asserted by tests:
++//   I1. first CRYPTO frame in wire order has offset≠0.
++//   I2. the offset-0 CRYPTO frame is NOT first.
++//   I3. PADDING runs and ≥1 PING between CRYPTO frames.
++//   I4. union of CRYPTO frames by offset = contiguous ClientHello [0..N), no gap.
++// ---------------------------------------------------------------------------
++
++// frameKind tags an entry in the wire-order plan.
++type frameKind int
++
++const (
++	frameCrypto frameKind = iota
++	framePing
++	framePadding
++)
++
++// planEntry is one frame in wire order. For frameCrypto, cryptoIdx selects which
++// ClientHello slice (by offset boundary) to emit. For framePadding, padLen is
++// the run length of zero bytes.
++type planEntry struct {
++	kind      frameKind
++	cryptoIdx int  // index into the offset-sorted fragment list
++	padLen    int  // PADDING run length (when padFlex is false)
++	padFlex   bool // PADDING run sized at build time to absorb the remaining slack
++}
++
++// quicGenParams are the robustness "knobs" for the QUIC Initial generator. They
++// exist so the obfuscation can be escalated WITHOUT a code change if the target
++// DPI ever stops being fooled by the current 6-fragment / 1250-byte shape —
++// e.g. a DPI that starts keeping a small reassembly buffer is defeated by more
++// fragments and a different per-packet layout. Every combination still satisfies
++// the I1–I4 invariants (enforced by randomizedWirePlan + planFragmentsN).
++//
++// The zero value is NOT valid; use defaultQUICGenParams(). All randomness is
++// per-call (crypto/rand), so two calls with the same params still produce
++// different DCID / TLS random / cut points / wire order — no cross-user
++// signature even at fixed params.
++type quicGenParams struct {
++	fragments   int // number of CRYPTO fragments the ClientHello is cut into (≥2)
++	pings       int // number of PING frames interleaved between CRYPTO frames (≥1)
++	totalLenMin int // inclusive lower bound for the final datagram size (≥1200)
++	totalLenMax int // inclusive upper bound for the final datagram size
++}
++
++// defaultQUICGenParams returns the device-proven baseline: 6 fragments, 2 PINGs,
++// a fixed 1250-byte datagram (totalLenMin==totalLenMax). This reproduces the
++// shape that passed real-DPI testing; only the per-call layout/cutpoints
++// are randomized on top of it.
++func defaultQUICGenParams() quicGenParams {
++	return quicGenParams{
++		fragments:   6,
++		pings:       2,
++		totalLenMin: quicInitialTotalLen,
++		totalLenMax: quicInitialTotalLen,
++	}
++}
++
++// cryptoFragment is one contiguous slice of the ClientHello at a given offset.
++type cryptoFragment struct {
++	offset uint64
++	data   []byte
++}
++
++// The device-proven baseline was 6 fragments at offsets
++// [0,236,266,275,283,290] in a fixed wire order with first CRYPTO offset=236.
++// That exact layout is now ONE sample of the randomized space below: per call we
++// pick random cut points (planFragmentsN) and a random out-of-order wire plan
++// (randomizedWirePlan), so no two clients share a fixed fragment signature while
++// the I1–I4 invariants always hold.
++
++// planFragmentsN slices the ClientHello into n contiguous fragments at RANDOM
++// cut points (instead of the fixed etalonCutpoints), keeping the reassembly
++// contiguous and complete (I4). Cut points are n-1 distinct interior offsets in
++// [1, len(ch)-1]; fragment i runs [cut[i], cut[i+1]). Every fragment is
++// non-empty. Returned fragments are in OFFSET order (fragment 0 = offset 0).
++func planFragmentsN(ch []byte, n int) ([]cryptoFragment, error) {
++	if n < 2 {
++		return nil, E.New("amneziawg: need ≥2 CRYPTO fragments")
++	}
++	if len(ch) < n {
++		return nil, E.New("amneziawg: ClientHello too short for the requested fragment count")
++	}
++	// Choose n-1 distinct interior cut points in [1, len(ch)-1].
++	cutSet := make(map[int]struct{}, n-1)
++	interior := len(ch) - 1 // candidate positions 1..len(ch)-1
++	for len(cutSet) < n-1 {
++		p, err := randInt(interior) // 0..interior-1
++		if err != nil {
++			return nil, err
++		}
++		cutSet[p+1] = struct{}{} // map to 1..len(ch)-1
++	}
++	cuts := make([]int, 0, n+1)
++	cuts = append(cuts, 0)
++	for p := range cutSet {
++		cuts = append(cuts, p)
++	}
++	cuts = append(cuts, len(ch))
++	sortInts(cuts)
++
++	frags := make([]cryptoFragment, n)
++	for i := 0; i < n; i++ {
++		frags[i] = cryptoFragment{offset: uint64(cuts[i]), data: ch[cuts[i]:cuts[i+1]]}
++	}
++	return frags, nil
++}
++
++// randomizedWirePlan builds a per-call out-of-order wire plan over the given
++// offset-ordered fragments, satisfying the invariants by construction:
++//
++//	I1 — the first CRYPTO frame on the wire has offset≠0;
++//	I2 — the offset-0 fragment is not first;
++//	I3 — `pings` PING frames and PADDING runs are interleaved between CRYPTO
++//	     frames, and exactly one PADDING run is flex (absorbs the slack);
++//	I4 — every fragment appears exactly once (a permutation), so the offsets
++//	     reassemble contiguously (guaranteed by planFragmentsN).
++//
++// The CRYPTO order is a random permutation, repaired so fragment 0 is not first.
++// PING and PADDING entries are then woven into the gaps between CRYPTO frames at
++// random positions, with one PADDING marked flex.
++func randomizedWirePlan(frags []cryptoFragment, pings int) ([]planEntry, error) {
++	n := len(frags)
++	if n < 2 {
++		return nil, E.New("amneziawg: need ≥2 CRYPTO fragments for a wire plan")
++	}
++	if pings < 1 {
++		pings = 1
++	}
++
++	// Random permutation of fragment indices (Fisher–Yates with crypto/rand).
++	order := make([]int, n)
++	for i := range order {
++		order[i] = i
++	}
++	for i := n - 1; i > 0; i-- {
++		j, err := randInt(i + 1)
++		if err != nil {
++			return nil, err
++		}
++		order[i], order[j] = order[j], order[i]
++	}
++	// I1+I2: ensure the offset-0 fragment (index 0) is not first on the wire.
++	if order[0] == 0 {
++		// swap it with the second slot; n≥2 so this slot exists and is ≠ index 0.
++		order[0], order[1] = order[1], order[0]
++	}
++
++	// Build CRYPTO entries in the permuted order.
++	cryptoEntries := make([]planEntry, n)
++	for i, idx := range order {
++		cryptoEntries[i] = planEntry{kind: frameCrypto, cryptoIdx: idx}
++	}
++
++	// Filler entries: `pings` PINGs + a few PADDING runs (one flex). We use
++	// (pings + 2) PADDING runs so there is always padding both before the flex
++	// and around the PINGs; the flex run is randomly placed among them.
++	padRuns := pings + 2
++	flexPick, err := randInt(padRuns)
++	if err != nil {
++		return nil, err
++	}
++	fillers := make([]planEntry, 0, pings+padRuns)
++	for i := 0; i < pings; i++ {
++		fillers = append(fillers, planEntry{kind: framePing})
++	}
++	for i := 0; i < padRuns; i++ {
++		e := planEntry{kind: framePadding}
++		if i == flexPick {
++			e.padFlex = true
++		} else {
++			// small fixed run; the flex run absorbs the bulk to hit targetLen.
++			sz, err := randInt(48)
++			if err != nil {
++				return nil, err
++			}
++			e.padLen = 8 + sz // 8..55 bytes
++		}
++		fillers = append(fillers, e)
++	}
++
++	// Weave: place CRYPTO frames in order, inserting fillers at random gaps. We
++	// must keep CRYPTO relative order (it carries I1/I2); fillers go between them.
++	// Build a sequence of n "slots after each CRYPTO" plus one leading slot, and
++	// drop each filler into a random slot — but never before the first CRYPTO
++	// (a leading PADDING/PING is fine for realism, but the FIRST frame must be the
++	// offset≠0 CRYPTO for I1). So filler slots are the n gaps AFTER crypto[0..n-1].
++	plan := make([]planEntry, 0, n+len(fillers))
++	gaps := make([][]planEntry, n) // fillers to emit AFTER cryptoEntries[i]
++	for _, f := range fillers {
++		slot, err := randInt(n) // 0..n-1 → after crypto[slot]
++		if err != nil {
++			return nil, err
++		}
++		gaps[slot] = append(gaps[slot], f)
++	}
++	for i, c := range cryptoEntries {
++		plan = append(plan, c)
++		plan = append(plan, gaps[i]...)
++	}
++	return plan, nil
++}
++
++// randInt returns a uniform random int in [0, n) using crypto/rand. n must be ≥1.
++func randInt(n int) (int, error) {
++	if n <= 1 {
++		return 0, nil
++	}
++	v, err := rand.Int(rand.Reader, big.NewInt(int64(n)))
++	if err != nil {
++		return 0, err
++	}
++	return int(v.Int64()), nil
++}
++
++// sortInts is a tiny ascending insertion sort (slices are ≤ a dozen elements).
++func sortInts(a []int) {
++	for i := 1; i < len(a); i++ {
++		for j := i; j > 0 && a[j-1] > a[j]; j-- {
++			a[j-1], a[j] = a[j], a[j-1]
++		}
++	}
++}
++
++// appendCryptoFrame writes a CRYPTO frame: 0x06 ‖ varint(offset) ‖ varint(len) ‖ data.
++func appendCryptoFrame(dst []byte, f cryptoFragment) []byte {
++	dst = append(dst, 0x06)
++	dst = appendQUICVarint(dst, f.offset)
++	dst = appendQUICVarint(dst, uint64(len(f.data)))
++	return append(dst, f.data...)
++}
++
++// planFixedLen returns the byte length the plan contributes EXCLUDING the single
++// flex PADDING run, plus a bool for whether a flex entry exists. Used to size the
++// flex run so the whole payload lands exactly on targetLen.
++func planFixedLen(frags []cryptoFragment, plan []planEntry) (int, bool, error) {
++	total := 0
++	flex := false
++	for _, e := range plan {
++		switch e.kind {
++		case frameCrypto:
++			if e.cryptoIdx < 0 || e.cryptoIdx >= len(frags) {
++				return 0, false, E.New("amneziawg: bad crypto fragment index in wire plan")
++			}
++			f := frags[e.cryptoIdx]
++			total += 1 + varintLen(f.offset) + varintLen(uint64(len(f.data))) + len(f.data)
++		case framePing:
++			total++
++		case framePadding:
++			if e.padFlex {
++				flex = true
++				continue
++			}
++			total += e.padLen
++		}
++	}
++	return total, flex, nil
++}
++
++// buildInitialPayload emits the frames in wire order per the plan, sizing the
++// flex PADDING run so the payload is exactly targetLen. The plan's order is what
++// produces the out-of-order CRYPTO layout (I1–I3); planFragments guarantees the
++// offsets reassemble contiguously (I4).
++func buildInitialPayload(frags []cryptoFragment, plan []planEntry, targetLen int) ([]byte, error) {
++	fixed, hasFlex, err := planFixedLen(frags, plan)
++	if err != nil {
++		return nil, err
++	}
++	if !hasFlex {
++		return nil, E.New("amneziawg: wire plan has no flex PADDING run to absorb slack")
++	}
++	flexLen := targetLen - fixed
++	if flexLen < 0 {
++		return nil, E.New("amneziawg: QUIC Initial frames overflow the length field (ClientHello too large)")
++	}
++
++	out := make([]byte, 0, targetLen)
++	for _, e := range plan {
++		switch e.kind {
++		case frameCrypto:
++			out = appendCryptoFrame(out, frags[e.cryptoIdx])
++		case framePing:
++			out = append(out, 0x01)
++		case framePadding:
++			n := e.padLen
++			if e.padFlex {
++				n = flexLen
++			}
++			for i := 0; i < n; i++ {
++				out = append(out, 0x00)
++			}
++		}
++	}
++	if len(out) != targetLen {
++		return nil, E.New("amneziawg: QUIC Initial payload did not land on the length field")
++	}
++	return out, nil
++}
++
++// varintLen returns how many bytes appendQUICVarint will emit for v.
++func varintLen(v uint64) int {
++	switch {
++	case v < 1<<6:
++		return 1
++	case v < 1<<14:
++		return 2
++	case v < 1<<30:
++		return 4
++	default:
++		return 8
++	}
++}
++
++// ---------------------------------------------------------------------------
++// RFC 9001 §5 Initial encryption. Mirror of common/sniff/quic.go (decrypt path),
++// reusing qtls helpers. For pn_len=1 / packet number 0.
++// ---------------------------------------------------------------------------
++
++// deriveInitialKeys derives the client Initial key/iv/hp from the DCID
++// (RFC 9001 §5.1/§5.2): HKDF-Extract(salt, dcid) → "client in" → quic key/iv/hp.
++func deriveInitialKeys(dcid []byte) (key, iv, hp []byte) {
++	initialSecret := hkdf.Extract(crypto.SHA256.New, dcid, quicSaltV1)
++	clientSecret := quicHKDFExpandLabel(crypto.SHA256, initialSecret, []byte{}, "client in", crypto.SHA256.Size())
++	key = quicHKDFExpandLabel(crypto.SHA256, clientSecret, []byte{}, "quic key", 16)
++	iv = quicHKDFExpandLabel(crypto.SHA256, clientSecret, []byte{}, "quic iv", 12)
++	hp = quicHKDFExpandLabel(crypto.SHA256, clientSecret, []byte{}, "quic hp", 16)
++	return
++}
++
++// encryptInitial seals the payload and applies header protection in place.
++// header is the unprotected long header up to and including the packet number;
++// pnOffset is the byte index of the packet number within header. Returns the
++// full wire packet: protected header ‖ ciphertext (incl. 16-byte tag).
++//
++// Header protection per RFC 9001 §5.4: sample the ciphertext at offset 4 from
++// the start of the packet number field (so for pn_len=1, ct[3:19]), AES-ECB it
++// with hp, then XOR the low 4 bits of the first byte with mask[0] and each
++// packet-number byte with mask[1+i].
++func encryptInitial(header, payload, key, iv, hp []byte, pnOffset int, pn uint64) ([]byte, error) {
++	cipher := quicAEADAESGCMTLS13(key, iv)
++	// nonce is 8 bytes (the sequence number); qtls XORs it onto iv internally.
++	nonce := make([]byte, cipher.NonceSize())
++	binary.BigEndian.PutUint64(nonce[cipher.NonceSize()-8:], pn)
++	ciphertext := cipher.Seal(nil, nonce, payload, header)
++
++	packet := make([]byte, 0, len(header)+len(ciphertext))
++	packet = append(packet, header...)
++	packet = append(packet, ciphertext...)
++
++	// Sample starts 4 bytes after the packet-number field begins.
++	sampleOffset := pnOffset + 4
++	if sampleOffset+aes.BlockSize > len(packet) {
++		return nil, E.New("amneziawg: QUIC Initial too short to sample for header protection")
++	}
++	block, err := aes.NewCipher(hp)
++	if err != nil {
++		return nil, err
++	}
++	mask := make([]byte, aes.BlockSize)
++	block.Encrypt(mask, packet[sampleOffset:sampleOffset+aes.BlockSize])
++	packet[0] ^= mask[0] & 0x0f // long header: protect low 4 bits of first byte
++	for i := 0; i < quicPacketNumberLen; i++ {
++		packet[pnOffset+i] ^= mask[1+i]
++	}
++	return packet, nil
++}
++
++// buildInitialPacket assembles a complete QUIC v1 Initial datagram carrying the
++// fragmented ClientHello for sni, per the given params. Fresh DCID, TLS random,
++// ephemeral x25519 key, random cut points and a random wire order are generated
++// per call, so every invocation yields a unique ciphertext AND a unique
++// fragment layout — no cross-user signature even at fixed params.
++func buildInitialPacket(sni, browser string, p quicGenParams) ([]byte, error) {
++	dcid := make([]byte, quicDCIDLen)
++	if _, err := rand.Read(dcid); err != nil {
++		return nil, err
++	}
++	var tlsRandom [32]byte
++	if _, err := rand.Read(tlsRandom[:]); err != nil {
++		return nil, err
++	}
++	// Real ephemeral x25519 public key for the key_share extension (point-on-curve
++	// valid, what a real client sends; the decoy never completes the ECDH).
++	ecKey, err := ecdh.X25519().GenerateKey(rand.Reader)
++	if err != nil {
++		return nil, err
++	}
++
++	clientHello, err := buildClientHello(sni, tlsRandom, ecKey.PublicKey().Bytes(), browser)
++	if err != nil {
++		return nil, err
++	}
++
++	// Random per-call cut points (I4 preserved) and out-of-order wire plan
++	// (I1–I3 preserved by construction).
++	frags, err := planFragmentsN(clientHello, p.fragments)
++	if err != nil {
++		return nil, err
++	}
++	plan, err := randomizedWirePlan(frags, p.pings)
++	if err != nil {
++		return nil, err
++	}
++
++	// Pick the datagram size from the configured range (a knob: varying the size
++	// between packets removes the fixed-1250 tell). pn_len is fixed at 1.
++	totalLen, err := pickTotalLen(p)
++	if err != nil {
++		return nil, err
++	}
++
++	// Header length depends on the DCID length and the length-field varint width.
++	// Compute the header size, then the length field = pn_len + payload + tag, and
++	// the payload region = totalLen - headerLen - tag. The length-field varint is
++	// 2 bytes for any value in [64, 16383], which covers all our sizes (≥1200).
++	const headerFixed = 1 + 4 + 1 + 1 + 1 // first + version + dcidLen + scidLen(0) + tokenLen(0)
++	const lenFieldVarintWidth = 2
++	headerLen := headerFixed + quicDCIDLen + lenFieldVarintWidth + quicPacketNumberLen
++	payloadLen := totalLen - headerLen - quicAEADTagLen
++	lengthField := quicPacketNumberLen + payloadLen + quicAEADTagLen
++	if lengthField < 1<<6 || lengthField >= 1<<14 {
++		return nil, E.New("amneziawg: QUIC Initial length field outside 2-byte varint range")
++	}
++
++	payload, err := buildInitialPayload(frags, plan, payloadLen)
++	if err != nil {
++		return nil, err
++	}
++
++	// Unprotected long header: first byte 0xC0|(pn_len-1), version 1, DCID,
++	// SCID len 0, token len 0, length varint, packet number.
++	header := make([]byte, 0, headerLen)
++	header = append(header, 0xC0|byte(quicPacketNumberLen-1))
++	header = binary.BigEndian.AppendUint32(header, quicVersion1)
++	header = append(header, byte(quicDCIDLen))
++	header = append(header, dcid...)
++	header = append(header, 0x00) // SCID length 0
++	header = append(header, 0x00) // token length 0 (varint, single byte)
++	header = appendQUICVarint(header, uint64(lengthField))
++	pnOffset := len(header)
++	for i := 0; i < quicPacketNumberLen; i++ {
++		header = append(header, 0x00) // packet number 0
++	}
++
++	key, iv, hp := deriveInitialKeys(dcid)
++	packet, err := encryptInitial(header, payload, key, iv, hp, pnOffset, 0)
++	if err != nil {
++		return nil, err
++	}
++	if len(packet) != totalLen {
++		return nil, E.New("amneziawg: QUIC Initial assembled to unexpected size")
++	}
++	return packet, nil
++}
++
++// pickTotalLen returns a datagram size in [totalLenMin, totalLenMax], clamped to
++// the RFC 9000 §14.1 minimum (1200). When min==max it is deterministic.
++func pickTotalLen(p quicGenParams) (int, error) {
++	lo, hi := p.totalLenMin, p.totalLenMax
++	if lo < 1200 {
++		lo = 1200
++	}
++	if hi < lo {
++		hi = lo
++	}
++	if hi == lo {
++		return lo, nil
++	}
++	d, err := randInt(hi - lo + 1)
++	if err != nil {
++		return 0, err
++	}
++	return lo + d, nil
++}
++
++// masqueQUICInitialCPS builds the out-of-order fragmented QUIC Initial decoy and
++// emits it as a single static-bytes CPS tag. Uniqueness (fresh DCID + TLS random
++// + ephemeral key + random layout per call) is baked into the blob at generation
++// time, so no <r> randomness is needed — and could not be used anyway, since the
++// DCID feeds the key derivation that must happen before encryption.
++func masqueQUICInitialCPS(domain, browser string) (string, error) {
++	packet, err := buildInitialPacket(domain, browser, defaultQUICGenParams())
++	if err != nil {
++		return "", err
++	}
++	var b cpsBuilder
++	b.addBytes(packet)
++	return b.String(), nil
++}
+diff --git a/transport/wireguard/sip_invite_awg.go b/transport/wireguard/sip_invite_awg.go
+new file mode 100644
+index 0000000..6e9b3db
+--- /dev/null
++++ b/transport/wireguard/sip_invite_awg.go
+@@ -0,0 +1,149 @@
++//go:build with_awg
++
++// SIP INVITE + 100 Trying masquerade generator (multi-packet i1+i2).
++//
++// MODEL. The decoy is the opening exchange of a real SIP dialog (RFC 3261 §17):
++//   - i1 = a complete, self-contained INVITE request (Content-Length: 0, no SDP
++//     body) — exactly what a UAC sends to start a call.
++//   - i2 = a complete, self-contained "SIP/2.0 100 Trying" provisional response —
++//     what the server immediately replies with to acknowledge the INVITE.
++//
++// Each datagram is a WHOLE, valid SIP message on its own. This matters because
++// these go out as two independent UDP datagrams (amneziawg-go send.go sends each
++// ipacket separately, src=nil): UDP has no stream reassembly, so a pattern-
++// matching DPI inspects each datagram in isolation. An INVITE and a 100 Trying
++// each parse as valid SIP; together they read as the canonical start of a call.
++// (An earlier attempt fragmented ONE INVITE across i1/i2 — head in i1, SDP body
++// in i2 — which left each datagram individually malformed, since nothing
++// reassembles UDP. This shape supersedes it.)
++//
++// The two messages belong to ONE dialog, so their Via branch, From tag, Call-ID
++// and CSeq are IDENTICAL across i1 and i2. They are therefore generated ONCE and
++// baked into the static <b> bytes of both halves — they cannot be per-packet
++// <rc>/<rd> runs, which would emit different values into each slot and break the
++// dialog identity a stateful DPI checks.
++//
++// TEMPLATE. The byte layout matches the canonical RFC 3261 §24.2 example exactly
++// — header ORDER (INVITE → Via → Max-Forwards → To → From → Call-ID → CSeq →
++// Contact → Content-Type → Content-Length) and the THREE-HOST scheme of a real
++// call:
++//   - callee host (request-URI + To)  — the party being called, a DIFFERENT domain;
++//   - caller domain (From)            — our own domain (= the configured id);
++//   - caller UA host (Via/Call-ID/Contact) — our endpoint, a `pcNN.<caller-domain>`
++//     subdomain (the device, not the domain).
++//
++// Only the identifiers are randomised (no cross-user signature, unlike a literal
++// alice@atlanta.com / bob@biloxi.com replay which is a public DPI beacon): user
++// names and the callee/UA hosts are pronounceable PseudoGen strings; branch, tag,
++// Call-ID and CSeq are crypto/rand hex/digits. The configured id (LDH-validated,
++// CRLF-safe) becomes the caller domain so it stays visible on the wire.
++//
++// REQUIRES junk packets. This profile is meant to be used with jc/jmin/jmax > 0:
++// the masquerade decoys ride out alongside junk in the same pre-handshake burst.
++package wireguard
++
++import (
++	"strings"
++)
++
++// sipDialog holds the per-generation identifiers shared verbatim by the INVITE
++// (i1) and its 100 Trying (i2): without this sharing the two would not read as
++// one dialog. All fields are baked into static <b> bytes, never <rc>/<rd>.
++//
++// Three hosts, per the RFC 3261 §24.2 call shape (see file header):
++type sipDialog struct {
++	calleeHost string // request-URI / To host — the called party's domain
++	callerDom  string // From host — our domain (the configured id)
++	uaHost     string // Via / Call-ID / Contact host — our UA (pcNN.<callerDom>)
++	fromUser   string // caller local part (From / Contact)
++	toUser     string // callee local part (request-URI / To)
++	fromDisp   string // caller display name (capitalized)
++	toDisp     string // callee display name (capitalized)
++	branch     string // Via branch suffix (after the z9hG4bK magic cookie)
++	tag        string // From tag
++	callID     string // Call-ID local part (before @uaHost)
++	cseq       string // CSeq sequence number
++}
++
++// newSIPDialog builds a fresh dialog. domain may be "" — then a pseudo caller
++// domain is generated. The caller has already LDH-validated a non-empty domain;
++// it is used as the caller domain (From) so the configured id stays on the wire.
++// The callee is an independent pseudo-domain (a real INVITE calls OUT to another
++// host), and the UA host is a pcNN subdomain of the caller domain (the device).
++func newSIPDialog(domain string) sipDialog {
++	callerDom := strings.TrimSuffix(domain, ".")
++	if callerDom == "" {
++		callerDom = pgDomainHost()
++	}
++	fromUser := pgUser()
++	toUser := pgUser()
++	return sipDialog{
++		calleeHost: pgDomainHost(),                       // call OUT to a different domain
++		callerDom:  callerDom,                            // our domain (= id)
++		uaHost:     "pc" + pgDigits(2) + "." + callerDom, // our device, subdomain of our domain
++		fromUser:   fromUser,
++		toUser:     toUser,
++		fromDisp:   sipCapitalize(fromUser),
++		toDisp:     sipCapitalize(toUser),
++		branch:     pgHex(16), // Via branch (after z9hG4bK)
++		tag:        pgDigits(10),
++		callID:     pgHex(14), // Call-ID local part
++		cseq:       pgDigits(6),
++	}
++}
++
++// masqueSIPInviteCPS builds the i1 INVITE request: a complete request with no
++// body (Content-Length: 0), in the exact RFC 3261 §24.2 header order. Returns
++// the CPS string for slot i1.
++func masqueSIPInviteCPS(d sipDialog) (string, error) {
++	var s strings.Builder
++	s.WriteString("INVITE sip:" + d.toUser + "@" + d.calleeHost + " SIP/2.0\r\n")
++	s.WriteString("Via: SIP/2.0/UDP " + d.uaHost + ";branch=z9hG4bK" + d.branch + "\r\n")
++	s.WriteString("Max-Forwards: 70\r\n")
++	s.WriteString("To: " + d.toDisp + " <sip:" + d.toUser + "@" + d.calleeHost + ">\r\n")
++	s.WriteString("From: " + d.fromDisp + " <sip:" + d.fromUser + "@" + d.callerDom + ">;tag=" + d.tag + "\r\n")
++	s.WriteString("Call-ID: " + d.callID + "@" + d.uaHost + "\r\n")
++	s.WriteString("CSeq: " + d.cseq + " INVITE\r\n")
++	s.WriteString("Contact: <sip:" + d.fromUser + "@" + d.uaHost + ">\r\n")
++	s.WriteString("Content-Type: application/sdp\r\n")
++	s.WriteString("Content-Length: 0\r\n")
++	s.WriteString("\r\n")
++
++	var b cpsBuilder
++	b.addBytes([]byte(s.String()))
++	return b.String(), nil
++}
++
++// masqueSIPTryingCPS builds the i2 "SIP/2.0 100 Trying" provisional response for
++// the SAME dialog: status line + Via/To/From/Call-ID/CSeq echoed verbatim (same
++// branch/tag/Call-ID/CSeq and the same three hosts) + Content-Length: 0. A
++// provisional response omits the request-only headers (Max-Forwards/Contact/
++// Content-Type). Returns the CPS string for slot i2.
++func masqueSIPTryingCPS(d sipDialog) (string, error) {
++	var s strings.Builder
++	s.WriteString("SIP/2.0 100 Trying\r\n")
++	s.WriteString("Via: SIP/2.0/UDP " + d.uaHost + ";branch=z9hG4bK" + d.branch + "\r\n")
++	s.WriteString("To: " + d.toDisp + " <sip:" + d.toUser + "@" + d.calleeHost + ">\r\n")
++	s.WriteString("From: " + d.fromDisp + " <sip:" + d.fromUser + "@" + d.callerDom + ">;tag=" + d.tag + "\r\n")
++	s.WriteString("Call-ID: " + d.callID + "@" + d.uaHost + "\r\n")
++	s.WriteString("CSeq: " + d.cseq + " INVITE\r\n")
++	s.WriteString("Content-Length: 0\r\n")
++	s.WriteString("\r\n")
++
++	var b cpsBuilder
++	b.addBytes([]byte(s.String()))
++	return b.String(), nil
++}
++
++// sipCapitalize upper-cases the first byte of an ASCII pseudo-user so it reads
++// as a display name (Alice/Bob style). The input is a PseudoGen word: ASCII
++// lower-case letters plus '_', so a byte-wise upper of [0] is safe.
++func sipCapitalize(s string) string {
++	if s == "" {
++		return s
++	}
++	if c := s[0]; c >= 'a' && c <= 'z' {
++		return string(c-('a'-'A')) + s[1:]
++	}
++	return s
++}
+diff --git a/transport/wireguard/stun_request_awg.go b/transport/wireguard/stun_request_awg.go
+new file mode 100644
+index 0000000..a79e929
+--- /dev/null
++++ b/transport/wireguard/stun_request_awg.go
+@@ -0,0 +1,157 @@
++//go:build with_awg
++
++// STUN Binding Request masquerade generator — a WebRTC/ICE connectivity-check
++// packet (009 masquerade, ip=stun).
++//
++// This SUPERSEDES the earlier Binding Success Response decoy. A Success Response
++// (0x0101) is by definition the server's reply echoing a prior request; sending
++// one as the client's FIRST, unsolicited packet is a wrong-direction anomaly. A
++// Binding REQUEST (0x0001) is what an ICE agent legitimately sends first, so it
++// is the RFC-consistent shape for a client-initiated decoy.
++//
++// Device status. On the LTE/WARP DPI this feature targets this did NOT pass
++// device testing — neither this nor a minimal Binding Request — which indicates
++// that DPI blocks STUN toward a datacenter Cloudflare IP as a protocol class,
++// not on packet quality. We ship the strongest possible STUN shape anyway: it
++// may pass on a different provider whose DPI only checks "is this a well-formed
++// STUN packet". QUIC (quic_initial_awg.go) remains the proven mechanism. See the
++// 009 spec for the device-test record.
++//
++// The packet is a full WebRTC connectivity check: USERNAME, ICE-CONTROLLING,
++// PRIORITY, SOFTWARE, MESSAGE-INTEGRITY (HMAC-SHA1, RFC 5389 §15.4) and
++// FINGERPRINT (CRC-32, §15.5). MESSAGE-INTEGRITY is keyed with a random
++// short-term credential we invent per call: an on-path DPI cannot verify the
++// HMAC without the shared ICE password (which only the two ICE peers hold), so
++// structural presence — not cryptographic validity against a real session — is
++// what a DPI can check. Fresh transaction ID, ufrag, tie-breaker and integrity
++// key per call ⇒ no cross-user signature.
++package wireguard
++
++import (
++	"crypto/hmac"
++	"crypto/rand"
++	"crypto/sha1"
++	"encoding/binary"
++	"hash/crc32"
++)
++
++const (
++	stunTypeBindingRequest = 0x0001
++	stunAttrUsername       = 0x0006
++	stunAttrMsgIntegrity   = 0x0008
++	stunAttrPriority       = 0x0024
++	stunAttrSoftware       = 0x8022
++	stunAttrIceControlling = 0x802a
++	stunAttrFingerprint    = 0x8028
++	stunFingerprintXOR     = 0x5354554e
++)
++
++// stunSoftwareProduct is a plausible product string (a real client sends a
++// product name here, not random bytes). Mirrors a common libwebrtc value.
++const stunSoftwareProduct = "libwebrtc"
++
++// appendSTUNAttr appends a STUN attribute (type, length, value) padded to a
++// 4-byte boundary (RFC 5389 §15).
++func appendSTUNAttr(dst []byte, typ uint16, val []byte) []byte {
++	var h [4]byte
++	binary.BigEndian.PutUint16(h[0:], typ)
++	binary.BigEndian.PutUint16(h[2:], uint16(len(val)))
++	dst = append(dst, h[:]...)
++	dst = append(dst, val...)
++	for len(dst)%4 != 0 {
++		dst = append(dst, 0x00)
++	}
++	return dst
++}
++
++// buildSTUNBindingRequest assembles a full WebRTC-style STUN Binding Request with
++// fresh per-call entropy. The header message-length is computed in two stages so
++// that MESSAGE-INTEGRITY covers the message up to (and including) itself and
++// FINGERPRINT covers the message up to (and including) itself, per RFC 5389.
++func buildSTUNBindingRequest() ([]byte, error) {
++	// Fresh entropy: transaction ID, ufrag pair, ICE tie-breaker, integrity key.
++	txn := make([]byte, 12)
++	if _, err := rand.Read(txn); err != nil {
++		return nil, err
++	}
++	ufrag := make([]byte, 8) // 8 source bytes → "<4 hex>:<4 hex>" username (':' is a literal)
++	if _, err := rand.Read(ufrag); err != nil {
++		return nil, err
++	}
++	tie := make([]byte, 8)
++	if _, err := rand.Read(tie); err != nil {
++		return nil, err
++	}
++	prio := make([]byte, 4)
++	if _, err := rand.Read(prio); err != nil {
++		return nil, err
++	}
++	integrityKey := make([]byte, 16)
++	if _, err := rand.Read(integrityKey); err != nil {
++		return nil, err
++	}
++
++	username := stunICEUsername(ufrag)
++
++	// Attributes before MESSAGE-INTEGRITY.
++	var attrs []byte
++	attrs = appendSTUNAttr(attrs, stunAttrUsername, username)
++	attrs = appendSTUNAttr(attrs, stunAttrIceControlling, tie)
++	attrs = appendSTUNAttr(attrs, stunAttrPriority, prio)
++	attrs = appendSTUNAttr(attrs, stunAttrSoftware, []byte(stunSoftwareProduct))
++
++	// Header. message-length must count up to & including MESSAGE-INTEGRITY (24 B
++	// total: 4 attr header + 20 HMAC) when computing the HMAC.
++	const miAttrTotal = 24
++	header := make([]byte, 20)
++	binary.BigEndian.PutUint16(header[0:], stunTypeBindingRequest)
++	binary.BigEndian.PutUint32(header[4:], stunMagicCookie)
++	copy(header[8:], txn)
++
++	binary.BigEndian.PutUint16(header[2:], uint16(len(attrs)+miAttrTotal))
++	preMI := append(append([]byte{}, header...), attrs...)
++	mac := hmac.New(sha1.New, integrityKey)
++	mac.Write(preMI)
++	mi := mac.Sum(nil) // 20 bytes
++	withMI := appendSTUNAttr(preMI, stunAttrMsgIntegrity, mi)
++
++	// FINGERPRINT: message-length now counts up to & including FINGERPRINT (+8),
++	// CRC-32 over everything before FINGERPRINT, XORed with the magic constant.
++	const fpAttrTotal = 8
++	binary.BigEndian.PutUint16(withMI[2:], uint16(len(attrs)+miAttrTotal+fpAttrTotal))
++	crc := crc32.ChecksumIEEE(withMI) ^ stunFingerprintXOR
++	var fp [4]byte
++	binary.BigEndian.PutUint32(fp[:], crc)
++	pkt := appendSTUNAttr(withMI, stunAttrFingerprint, fp[:])
++
++	return pkt, nil
++}
++
++// stunICEUsername renders a libwebrtc-style "ufrag:ufrag" username from random
++// bytes, using only LDH-safe lowercase hex so the value is printable ASCII.
++func stunICEUsername(seed []byte) []byte {
++	const hexdigits = "0123456789abcdef"
++	out := make([]byte, 0, 9)
++	for i := 0; i < 4; i++ {
++		out = append(out, hexdigits[seed[i]%16])
++	}
++	out = append(out, ':')
++	for i := 4; i < 8; i++ {
++		out = append(out, hexdigits[seed[i]%16])
++	}
++	return out
++}
++
++// masqueSTUNRequestCPS builds the WebRTC Binding Request decoy and emits it as a
++// single static-bytes CPS tag (uniqueness baked in per call — the FINGERPRINT
++// CRC and MESSAGE-INTEGRITY HMAC depend on the random fields, so it cannot use
++// <r> randomness).
++func masqueSTUNRequestCPS() (string, error) {
++	pkt, err := buildSTUNBindingRequest()
++	if err != nil {
++		return "", err
++	}
++	var b cpsBuilder
++	b.addBytes(pkt)
++	return b.String(), nil
++}

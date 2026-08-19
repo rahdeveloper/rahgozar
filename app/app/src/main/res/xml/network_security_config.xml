@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  User-added CAs are deliberately not trusted.
+
+  Upstream trusted them so a developer could point the app at a proxy and read
+  its traffic. For this app that is the attack: anyone who can install a
+  certificate — a shared device, an MDM profile, a "install this to use our
+  wifi" page — could otherwise sit in the middle of the panel connection and
+  learn which panel this device talks to and when.
+
+  It is not the only defence. Everything the panel sends is signed with a key
+  baked into the app, and the server list is encrypted to a per-device key, so a
+  proxy holding a valid certificate still cannot forge a response or read the
+  configs inside one. This closes the metadata gap that remains.
+
+  Cleartext is off to match: the panel serves https only, and mirror addresses
+  are rejected at the panel unless they are https.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <!--
+      The core listens on loopback and the app's own speed test goes through it.
+      That traffic never leaves the device.
+    -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">127.0.0.1</domain>
+        <domain includeSubdomains="false">localhost</domain>
+    </domain-config>
+</network-security-config>

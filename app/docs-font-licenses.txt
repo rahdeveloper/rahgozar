@@ -1,0 +1,6 @@
+Vazirmatn — SIL Open Font License 1.1 — https://github.com/rastikerdar/vazirmatn
+JetBrains Mono — SIL Open Font License 1.1 — https://github.com/JetBrains/JetBrainsMono
+
+Both are the typefaces the UI design specifies. OFL permits bundling in an
+application; the licence text must ship with the app, which the existing
+open_source_licenses.html asset covers.

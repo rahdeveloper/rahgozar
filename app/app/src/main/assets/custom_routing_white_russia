@@ -1,0 +1,50 @@
+[
+  {
+    "remarks": "Direct bittorrent",
+    "outboundTag": "direct",
+    "protocol": [
+      "bittorrent"
+    ],
+    "enabled": true
+  },
+  {
+    "remarks": "Block udp443",
+    "outboundTag": "block",
+    "port": "443",
+    "network": "udp",
+    "enabled": true
+  },
+  {
+    "remarks": "Direct LAN IP",
+    "outboundTag": "direct",
+    "ip": [
+      "geoip:private"
+    ],
+    "enabled": true
+  },
+  {
+    "remarks": "Direct LAN domains",
+    "outboundTag": "direct",
+    "domain": [
+      "geosite:private"
+    ],
+    "enabled": true
+  },
+  {
+    "remarks": "Direct Russia domains",
+    "outboundTag": "direct",
+    "domain": [
+      "domain:ru",
+      "geosite:category-ru"
+    ],
+    "enabled": true
+  },
+  {
+    "remarks": "Direct Russia IP",
+    "outboundTag": "direct",
+    "ip": [
+      "geoip:ru"
+    ],
+    "enabled": true
+  }
+]

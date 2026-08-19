@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Kept for any launcher that still resolves the flat colour; the icon
+         itself now uses @drawable/ic_launcher_background, which carries the
+         design's radial wash. -->
+    <color name="ic_launcher_background">#040806</color>
+</resources>

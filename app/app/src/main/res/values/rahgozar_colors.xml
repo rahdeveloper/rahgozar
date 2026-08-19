@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches Brand.Background, so the window behind Compose is never a
+         different colour for the frame before the first draw. -->
+    <color name="rahgozar_splash_bg">#080A09</color>
+</resources>

@@ -1,0 +1,43 @@
+{
+  "key_id": "gCajo7corf8",
+  "sign_public_key": "85UxCdkVJ_U9_jfeSSCWTi0csCnB_lWasYp_lwtRXnc",
+  "exch_public_key": "SpgnB0XhyqH_x3zKsdR_7amHRy1GEwdmjLMSgl8e1Gk",
+  "direct_endpoints": [
+    {
+      "url": "https://panel.xmsh.space",
+      "weight": 100
+    }
+  ],
+  "sources": [
+    {
+      "type": "http",
+      "url": "https://panel.xmsh.space/v1/endpoints",
+      "priority": 10,
+      "label": "The panel's own domain"
+    },
+    {
+      "type": "http",
+      "url": "https://cdn.jsdelivr.net/gh/alifrmcloud/endpoints@main/e.json",
+      "priority": 20,
+      "label": "GitHub repo (jsDelivr)"
+    },
+    {
+      "type": "http",
+      "url": "https://cdn.statically.io/gh/alifrmcloud/endpoints@main/e.json",
+      "priority": 21,
+      "label": "GitHub repo (Statically)"
+    },
+    {
+      "type": "http",
+      "url": "https://raw.githubusercontent.com/alifrmcloud/endpoints/main/e.json",
+      "priority": 22,
+      "label": "GitHub repo (Raw)"
+    }
+  ],
+  "doh_resolvers": [
+    "https://dns.google/resolve",
+    "https://cloudflare-dns.com/dns-query"
+  ],
+  "timeout_ms": 3000,
+  "generated_at": 1785777782
+}

@@ -1,0 +1,66 @@
+# ---------------------------------------------------------------------------
+# This directory is the public source repository (GPLv3). Everything not
+# ignored here becomes public, so this file is a safety boundary, not just
+# housekeeping — read docs/LICENSING.md (kept private) before loosening it.
+# ---------------------------------------------------------------------------
+
+# --- Secrets. Never relax these. ------------------------------------------
+# The example file (keystore.properties.example) is checked in; the real one
+# is not. `local.properties` is matched without a leading slash on purpose:
+# the upstream rule anchored it to this directory and missed app/local.properties.
+*.jks
+*.keystore
+*.p12
+keystore.properties
+signing.properties
+local.properties
+google-services.json
+.env
+
+# --- Build output ----------------------------------------------------------
+build/
+.gradle/
+captures/
+*.apk
+*.aab
+*.ap_
+*.dex
+.cxx/
+app/app/.cxx/
+
+# --- Prebuilt binaries -----------------------------------------------------
+# The AARs and .so files are build products, not source. GPL asks for the
+# source they are built from, and that is what cores/ and the vendored trees
+# carry. Shipping the binaries as well would only make the repo heavy and let
+# a stale artefact disagree with the source beside it.
+*.aar
+*.aar.*
+app/app/libs/**/*.so
+app/app/libs/*/hev-socks5-tunnel-bin
+
+# --- Cloned, not vendored --------------------------------------------------
+# Upstream MIT source, unmodified, with its own submodules. Kept out for the
+# same reason the sing-box tree is: a pinned commit and a clone command say the
+# same thing without carrying somebody else's repository inside ours. Its
+# licence obliges a notice, not redistribution. See the README for the pin.
+hev-socks5-tunnel/
+
+# --- Not built from here ---------------------------------------------------
+# A leftover clone from a feasibility test. Nothing in the build references it
+# and libv2ray.aar is a prebuilt upstream release — see the README. Left on
+# disk, kept out of the repo so nobody mistakes it for the source we build.
+AndroidLibXrayLite/
+
+# --- IDE and OS ------------------------------------------------------------
+.idea/
+*.iml
+.vscode/
+.DS_Store
+Thumbs.db
+
+# --- Noise -----------------------------------------------------------------
+*.log
+*.tmp
+*.bak
+*.orig
+*.swp

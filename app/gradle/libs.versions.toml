@@ -1,0 +1,90 @@
+[versions]
+agp = "9.3.1"
+desugarJdkLibs = "2.1.5"
+gradleLicensePlugin = "0.9.9"
+kotlin = "2.4.10"
+coreKtx = "1.19.0"
+junit = "4.13.2"
+junitVersion = "1.3.0"
+espressoCore = "3.7.0"
+activity = "1.13.0"
+mmkvStatic = "1.3.16"
+gson = "2.14.0"
+okhttp = "5.4.0"
+kotlinxCoroutines = "1.11.0"
+core = "3.5.4"
+workRuntimeKtx = "2.11.2"
+lifecycleViewmodelKtx = "2.11.0"
+# Mockito 5 made the inline mock maker the default and stopped publishing
+# the separate mockito-inline artifact after 5.2.0, so this moved to
+# mockito-core. The bump is not cosmetic: 5.2.0 ships a Byte Buddy that
+# refuses to instrument on JDK 24, which is what builds here.
+mockito = "5.20.0"
+mockitoKotlin = "5.4.0"
+# Nothing in this app uses Fragments — every screen is Compose on a
+# ComponentActivity — but play-services-basement drags in fragment 1.1.0, and
+# lint fails a release build over it: versions below 1.3.0 shipped a
+# FragmentActivity that mishandled the ActivityResult APIs the app does use.
+# Constrained rather than silenced, so the stale copy is gone instead of
+# merely unreported.
+fragment = "1.8.9"
+camerax = "1.6.1"
+composeBom = "2026.06.01"
+reorderable = "3.1.0"
+tink = "1.23.0"
+playServicesAds = "24.6.0"
+[libraries]
+androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
+desugar-jdk-libs = { module = "com.android.tools:desugar_jdk_libs", version.ref = "desugarJdkLibs" }
+gradle-license-plugin = { module = "com.jaredsburrows:gradle-license-plugin", version.ref = "gradleLicensePlugin" }
+junit = { group = "junit", name = "junit", version.ref = "junit" }
+androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }
+androidx-espresso-core = { group = "androidx.test.espresso", name = "espresso-core", version.ref = "espressoCore" }
+mmkv-static = { module = "com.tencent:mmkv-static", version.ref = "mmkvStatic" }
+gson = { module = "com.google.code.gson:gson", version.ref = "gson" }
+okhttp = { module = "com.squareup.okhttp3:okhttp", version.ref = "okhttp" }
+# Real HTTP in unit tests: the panel client is worth testing against actual
+# responses, including the malformed ones a censored network produces.
+okhttp-mockwebserver = { module = "com.squareup.okhttp3:mockwebserver3-junit4", version.ref = "okhttp" }
+# Lets the test server speak https, so the client's "https only" rule is
+# exercised rather than worked around.
+okhttp-tls = { module = "com.squareup.okhttp3:okhttp-tls", version.ref = "okhttp" }
+kotlinx-coroutines-android = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-android", version.ref = "kotlinxCoroutines" }
+kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "kotlinxCoroutines" }
+core = { module = "com.google.zxing:core", version.ref = "core" }
+work-runtime-ktx = { module = "androidx.work:work-runtime-ktx", version.ref = "workRuntimeKtx" }
+work-multiprocess = { module = "androidx.work:work-multiprocess", version.ref = "workRuntimeKtx" }
+lifecycle-viewmodel-ktx = { module = "androidx.lifecycle:lifecycle-viewmodel-ktx", version.ref = "lifecycleViewmodelKtx" }
+lifecycle-runtime-ktx = { module = "androidx.lifecycle:lifecycle-runtime-ktx", version.ref = "lifecycleViewmodelKtx" }
+mockito-core = { module = "org.mockito:mockito-core", version.ref = "mockito" }
+mockito-kotlin = { module = "org.mockito.kotlin:mockito-kotlin", version.ref = "mockitoKotlin" }
+reorderable = { module = "sh.calvin.reorderable:reorderable", version.ref = "reorderable" }
+# Ed25519 and X25519: neither is in java.security below API 33, and the
+# panel protocol needs both on a minSdk of 24.
+tink-android = { module = "com.google.crypto.tink:tink-android", version.ref = "tink" }
+# AdMob. Which formats and units are used is entirely panel state; the SDK is
+# only initialised when the panel says ads are on.
+play-services-ads = { module = "com.google.android.gms:play-services-ads", version.ref = "playServicesAds" }
+
+# Constrained, never used directly. See the version comment above.
+androidx-fragment = { module = "androidx.fragment:fragment", version.ref = "fragment" }
+
+# CameraX
+camerax-core = { module = "androidx.camera:camera-core", version.ref = "camerax" }
+camerax-camera2 = { module = "androidx.camera:camera-camera2", version.ref = "camerax" }
+camerax-lifecycle = { module = "androidx.camera:camera-lifecycle", version.ref = "camerax" }
+camerax-compose = { module = "androidx.camera:camera-compose", version.ref = "camerax" }
+
+androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activity" }
+androidx-compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
+androidx-compose-foundation = { group = "androidx.compose.foundation", name = "foundation" }
+androidx-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+androidx-compose-ui = { group = "androidx.compose.ui", name = "ui" }
+androidx-compose-ui-tooling = { group = "androidx.compose.ui", name = "ui-tooling" }
+androidx-compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
+lifecycle-runtime-compose = { module = "androidx.lifecycle:lifecycle-runtime-compose", version.ref = "lifecycleViewmodelKtx" }
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+android-library = { id = "com.android.library", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }

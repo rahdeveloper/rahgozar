@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Notification icon, idle: the mark as a silhouette. Android draws these as an
+    alpha mask and tints them itself, so everything is flat white and the road's
+    dark fill is left out — at 24dp a filled road reads as a solid blob.
+
+    Coordinates are the design's 100-unit mark, unscaled: its ink already runs
+    y 18..90, which is close to the full height a status icon should use.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="100"
+    android:viewportHeight="100">
+
+    <path
+        android:pathData="M32,90 L45.5,22 Q50,18 54.5,22 L68,90 Z"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="6"
+        android:strokeLineJoin="round" />
+    <path
+        android:pathData="M43.5,45.5 a6.4,6.4 0 1,0 12.8,0 a6.4,6.4 0 1,0 -12.8,0 Z"
+        android:fillColor="#FFFFFFFF" />
+</vector>
