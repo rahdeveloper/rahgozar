@@ -321,6 +321,27 @@ tasks.configureEach {
                 logger.warn("WARNING: $message")
             }
 
+            // The AdMob application id is the one ad setting the panel cannot
+            // carry, so it is also the one that can ship wrong. Google's public
+            // test id does not belong to anybody's account: requests made under
+            // it are not attributed, so even real unit ids from the panel earn
+            // nothing. Nothing fails visibly — the app runs, ads appear, and the
+            // only symptom is a revenue line that stays at zero.
+            //
+            // A warning and not a failure, by the operator's decision on
+            // 2026-08-20: first release ships on the test id and a later update
+            // carries the real one. So this exists to keep "later" from
+            // becoming "never" — it is the only symptom the mistake has.
+            val admobAppId = (properties["admobAppId"] as? String).orEmpty()
+            if (admobAppId.isBlank() || admobAppId.startsWith("ca-app-pub-3940256099942544")) {
+                logger.warn(
+                    "WARNING: this release carries Google's TEST AdMob application id. Ads will " +
+                        "show and earn nothing, whatever unit ids the panel sends. Set " +
+                        "admobAppId=ca-app-pub-XXXX~YYYY in gradle.properties for a build that " +
+                        "monetises. See docs/PLAY-SUBMISSION.md.",
+                )
+            }
+
             if (!hasReleaseSigning) {
                 throw GradleException(
                     "release signing is not configured — copy keystore.properties.example to " +
