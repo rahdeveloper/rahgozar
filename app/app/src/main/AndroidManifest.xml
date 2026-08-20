@@ -284,8 +284,22 @@
             <meta-data
                 android:name="android.appwidget.provider"
                 android:resource="@xml/app_widget_provider" />
+            <!--
+              Exported because Android sends APPWIDGET_UPDATE, and only that.
+              An exported receiver is reachable by explicit intent from any app
+              regardless of this filter, so the tap that starts and stops the
+              user's VPN is handled by WidgetActionReceiver below, which is not
+              exported. See that class.
+            -->
             <intent-filter>
                 <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+        </receiver>
+        <receiver
+            android:name=".receiver.WidgetActionReceiver"
+            android:exported="false"
+            android:process=":RunSoLibV2RayDaemon">
+            <intent-filter>
                 <action android:name="${applicationId}.action.widget.click" />
                 <action android:name="${applicationId}.action.activity" />
             </intent-filter>
