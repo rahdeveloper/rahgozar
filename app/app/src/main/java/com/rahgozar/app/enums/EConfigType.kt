@@ -23,6 +23,11 @@ enum class EConfigType(val value: Int, val protocolScheme: String) {
     // Not an Xray protocol either: the whole sing-box configuration rides in
     // ProfileItem.singboxConfig and SingBoxService runs it through libbox.
     SINGBOX(12, AppConfig.SINGBOX),
+
+    // Not an Xray protocol either: Cloudflare WARP over MASQUE, run by the Rust
+    // libwhiteaesther_core through AetherVpnService. Self-configuring — the
+    // profile carries only a panel-given name, no server address or config.
+    AETHER(13, AppConfig.AETHER),
     POLICYGROUP(101, AppConfig.CUSTOM),
     PROXYCHAIN(102, AppConfig.CUSTOM);
 

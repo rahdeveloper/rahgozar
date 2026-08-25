@@ -270,6 +270,10 @@ object AppConfig {
     const val TROJAN = "trojan://"
     const val OPENVPN = "openvpn://"
     const val SINGBOX = "singbox://"
+    // Aether (Cloudflare WARP over MASQUE). Self-configuring, so a profile of
+    // this type carries no address — just a panel-given name. AetherVpnService
+    // runs it. See docs and com.rahgozar.app.service.AetherVpnService.
+    const val AETHER = "aether://"
     const val WIREGUARD = "wireguard://"
     const val TUIC = "tuic://"
     const val HYSTERIA = "hysteria://"

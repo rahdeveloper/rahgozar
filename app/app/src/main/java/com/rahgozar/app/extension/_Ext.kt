@@ -85,5 +85,5 @@ fun EConfigType.isComplexType(): Boolean {
  * @return True if the config type runs outside the Xray core.
  */
 fun EConfigType.runsOutsideXray(): Boolean {
-    return this == EConfigType.OPENVPN || this == EConfigType.SINGBOX
+    return this == EConfigType.OPENVPN || this == EConfigType.SINGBOX || this == EConfigType.AETHER
 }

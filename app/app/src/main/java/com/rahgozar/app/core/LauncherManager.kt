@@ -17,6 +17,8 @@ import com.rahgozar.app.helper.MessageHelper
 import com.rahgozar.app.root.RootManager
 import com.rahgozar.app.service.CoreProxyOnlyService
 import com.rahgozar.app.service.CoreRootService
+import com.rahgozar.app.service.AetherConfig
+import com.rahgozar.app.service.AetherVpnService
 import com.rahgozar.app.service.CoreVpnService
 import com.rahgozar.app.service.OpenVpnService
 import com.rahgozar.app.service.SingBoxService
@@ -120,6 +122,7 @@ object LauncherManager {
             }
 
         if (!config.configType.isComplexType()
+            && config.configType != EConfigType.AETHER
             && !Utils.isValidUrl(config.server)
             && !Utils.isPureIpAddress(config.server.orEmpty())
         ) {
@@ -150,7 +153,17 @@ object LauncherManager {
             error(context.getString(R.string.toast_root_required))
         }
 
-        val intent = if (config.configType == EConfigType.OPENVPN) {
+        val intent = if (config.configType == EConfigType.AETHER) {
+            // Before every other mode: an Aether profile has no address for the
+            // Xray core and self-configures against Cloudflare WARP, so only
+            // AetherVpnService can carry it. The engine config is built here
+            // because the panel server carries only a name.
+            LogUtil.i(AppConfig.TAG, "LauncherManager: Starting Aether service")
+            Intent(context.applicationContext, AetherVpnService::class.java).apply {
+                action = AetherVpnService.ACTION_START
+                putExtra(AetherVpnService.EXTRA_CONFIG, AetherConfig.tunConfig(context))
+            }
+        } else if (config.configType == EConfigType.OPENVPN) {
             // Checked before every other mode on purpose. An OpenVPN profile has
             // nothing for the Xray core to run, so root and proxy-only modes are
             // not alternatives here — they would start a service that cannot

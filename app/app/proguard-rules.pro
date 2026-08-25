@@ -85,6 +85,17 @@
     native <methods>;
 }
 
+# ------------------------------------------------ Aether WARP-MASQUE (JNI) --
+
+# libwhiteaesther_core (Rust) binds its JNI exports to the exact class name
+# com.whitedns.whiteaesther.core.NativeAetherBridge, and calls BACK into the
+# NativeSocketProtector / NativeEngineListener single-abstract-method interfaces
+# by name (protectSocket / onNativeReady) to protect the QUIC carrier socket and
+# to signal readiness. Same trap as hev above: the object's `external fun`s
+# become static native methods R8 would rename, and a renamed callback interface
+# aborts the JNI call. Keep the whole bridge package.
+-keep class com.whitedns.whiteaesther.** { *; }
+
 # ------------------------------------------------------------------- MMKV --
 
 # Native code constructs and calls into MMKV's Java side.

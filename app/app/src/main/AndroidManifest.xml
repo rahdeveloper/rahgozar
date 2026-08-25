@@ -234,6 +234,28 @@
         </service>
 
         <!--
+            Aether (Cloudflare WARP over MASQUE). Its own process because it loads
+            a third native runtime (libwhiteaesther_core, Rust) that must not share
+            an address space with the Xray or libbox cores. Not exported.
+        -->
+        <service
+            android:name=".service.AetherVpnService"
+            android:enabled="true"
+            android:exported="false"
+            android:foregroundServiceType="specialUse"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:process=":AetherDaemon"
+            tools:ignore="VpnServicePolicy">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="vpn" />
+        </service>
+
+        <!--
             The sing-box delay test. A third process, because it must not share
             one with the Xray runtime (CoreTestService's) nor with the tunnel's
             libbox paths — and the connect-time gate measures while the tunnel
