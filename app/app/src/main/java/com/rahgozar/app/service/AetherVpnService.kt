@@ -24,6 +24,7 @@ import com.whitedns.whiteaesther.core.NativeAetherBridge
 import com.whitedns.whiteaesther.core.NativeEngineListener
 import com.whitedns.whiteaesther.core.NativeSocketProtector
 import com.whitedns.whiteaesther.core.PreparedEngine
+import java.io.File
 import java.lang.ref.SoftReference
 import java.net.InetAddress
 import java.util.concurrent.atomic.AtomicBoolean
@@ -123,48 +124,79 @@ class AetherVpnService : VpnService(), ServiceControl {
     }
 
     private fun runEngine() {
+        // Connected is the engine's own verdict, tracked here so failure is only
+        // ever reported when the data-plane was never confirmed.
+        val ready = AtomicBoolean(false)
         try {
             // The protector must be in place before the engine opens any socket,
             // so its endpoint probes and the QUIC carrier go out on the real
             // network rather than being pulled back into the tunnel we create.
             NativeAetherBridge.setSocketProtector(NativeSocketProtector { fd -> protect(fd) })
 
-            // The engine wants a concrete framing. Walk the ladder the reference
-            // app's "auto" resolves to: h3 (MASQUE over QUIC) first, then h2
-            // (MASQUE over TLS/TCP) for networks that block UDP.
+            // Smart, resilient gateway hunt. Fast path first (turbo), then a
+            // thorough scan (balanced) that a high-latency network needs. Each
+            // mode tries the transports in `transportOrder()` — the last one that
+            // worked first, so a network that blocks UDP does not pay the full h3
+            // scan deadline on every connect (only the first). We only declare
+            // failure once every plan has come back empty — no premature give-up.
             var chosen: String? = null
             var prepared: PreparedEngine? = null
-            for (t in listOf(AetherConfig.Transport.H3, AetherConfig.Transport.H2)) {
-                val cfg = AetherConfig.tunConfig(this, t)
-                val p = NativeAetherBridge.prepare(cfg).getOrNull()
-                if (p != null) {
-                    LogUtil.i(AppConfig.TAG, "$TAG: prepared via ${t.wire}")
-                    chosen = cfg
-                    prepared = p
-                    break
+            val order = transportOrder()
+            outer@ for (mode in listOf("turbo", "balanced")) {
+                for (t in order) {
+                    if (!ownsSession) return
+                    val cfg = AetherConfig.tunConfig(this, t, scanMode = mode)
+                    val p = NativeAetherBridge.prepare(cfg).getOrNull()
+                    if (p != null) {
+                        LogUtil.i(AppConfig.TAG, "$TAG: prepared via ${t.wire} ($mode)")
+                        rememberTransport(t)
+                        chosen = cfg
+                        prepared = p
+                        break@outer
+                    }
+                    LogUtil.w(AppConfig.TAG, "$TAG: no gateway on ${t.wire} ($mode)")
                 }
-                LogUtil.w(AppConfig.TAG, "$TAG: prepare failed on ${t.wire}, trying next")
             }
             val cfg = chosen
-            val ready = prepared
-            if (cfg == null || ready == null) {
-                stopWithFailure("could not reach any Cloudflare endpoint (h3/h2)")
+            val engine = prepared
+            if (cfg == null || engine == null) {
+                stopWithFailure("no working Cloudflare gateway found")
                 return
             }
 
-            val fd = establishTunnel(ready.ipv4, ready.ipv6) ?: run {
-                stopWithFailure("could not establish TUN")
+            val fd = establishTunnel(engine.ipv4, engine.ipv6) ?: run {
+                stopWithFailure("could not establish the TUN")
                 return
             }
 
-            coreRunning = true
-            notifyUi(AppConfig.MSG_STATE_START_SUCCESS, "")
+            // onNativeReady fires only once the MASQUE data-plane is validated
+            // end-to-end, so we report success there rather than optimistically at
+            // establish. The UI trusts this and skips its own probe for this core
+            // (HomeViewModel.onTunnelUp), which is what stops a slow, high-latency
+            // connect from being failed before the tunnel has actually come up.
+            val listener = NativeEngineListener {
+                if (ready.compareAndSet(false, true)) {
+                    coreRunning = true
+                    LogUtil.i(AppConfig.TAG, "$TAG: tunnel ready — data confirmed")
+                    notifyUi(AppConfig.MSG_STATE_START_SUCCESS, "")
+                }
+            }
 
             // Blocks until the tunnel stops or errors.
-            val result = NativeAetherBridge.run(cfg, ready.peer, fd, NativeEngineListener { })
+            val result = NativeAetherBridge.run(cfg, engine.peer, fd, listener)
+            if (!ready.get() && ownsSession) {
+                // run() ended before any data ever came back — a real failure, not
+                // a stop we asked for.
+                stopWithFailure("the tunnel carried no data: ${result.error ?: "no gateway response"}")
+                return
+            }
             if (!result.ok) LogUtil.e(AppConfig.TAG, "$TAG: engine stopped: ${result.error}")
         } catch (t: Throwable) {
             LogUtil.e(AppConfig.TAG, "$TAG: engine crashed", t)
+            if (!ready.get() && ownsSession) {
+                stopWithFailure("engine error: ${t.message}")
+                return
+            }
         } finally {
             stopEverything()
         }
@@ -259,8 +291,31 @@ class AetherVpnService : VpnService(), ServiceControl {
         return super<VpnService>.setUnderlyingNetworks(networks)
     }
 
+    /**
+     * Transports to try, the last one that connected first. The default order
+     * (no memory yet) is h2 before h3 — the same order the reference client
+     * probes in, and the reason it connects in a second on a network that blocks
+     * UDP: h2 (MASQUE over TLS/TCP) is reachable almost everywhere, while h3's
+     * QUIC scan burns its full deadline finding nothing when UDP is blocked.
+     * Whatever actually won is remembered and tried first next time, so a network
+     * where h3 does work settles onto it.
+     */
+    private fun transportOrder(): List<AetherConfig.Transport> {
+        val all = listOf(AetherConfig.Transport.H2, AetherConfig.Transport.H3)
+        val last = runCatching {
+            val v = File(filesDir, LAST_TRANSPORT_FILE).takeIf { it.exists() }?.readText()?.trim()
+            all.firstOrNull { it.wire == v }
+        }.getOrNull() ?: return all
+        return listOf(last) + all.filter { it != last }
+    }
+
+    private fun rememberTransport(t: AetherConfig.Transport) {
+        runCatching { File(filesDir, LAST_TRANSPORT_FILE).writeText(t.wire) }
+    }
+
     companion object {
         private const val TAG = "AetherVpnService"
+        private const val LAST_TRANSPORT_FILE = "aether-last-transport"
         const val ACTION_START = "com.rahgozar.app.aether.START"
         const val ACTION_STOP = "com.rahgozar.app.aether.STOP"
         const val EXTRA_CONFIG = "config"

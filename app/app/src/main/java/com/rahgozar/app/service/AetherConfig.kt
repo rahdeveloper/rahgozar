@@ -33,6 +33,7 @@ object AetherConfig {
     fun tunConfig(
         context: Context,
         transport: Transport = Transport.H3,
+        scanMode: String = "turbo",
         dualStack: Boolean = true,
         fragmentTls: Boolean = false,
         encryptedHello: Boolean = false,
@@ -40,12 +41,12 @@ object AetherConfig {
         .put("mode", "tun")
         .put("configPath", File(context.filesDir, "aether.toml").absolutePath)
         .put("listenPort", 1819)
-        // turbo, not balanced: balanced walks the whole 120s scan budget before
-        // prepare() returns, which overruns the app's connect timeout and shows
-        // a spurious error before the tunnel comes up. turbo returns on the first
-        // verified gateway (a few seconds); the engine then caches it (lastconn)
-        // so later connects are faster still.
-        .put("scanMode", "turbo")
+        // turbo returns on the first verified gateway (a few seconds) and is the
+        // default; AetherVpnService falls back to "balanced" (a thorough scan with
+        // longer per-probe timeouts) when turbo finds nothing, which is what a
+        // high-latency network needs. The engine caches the winner (lastconn), so
+        // later connects are faster regardless.
+        .put("scanMode", scanMode)
         .put("ipScan", if (dualStack) "both" else "v4")
         // The engine's prepare() rejects "auto" — that is a UI policy the caller
         // resolves to a real framing first. Default here is h3; AetherVpnService
