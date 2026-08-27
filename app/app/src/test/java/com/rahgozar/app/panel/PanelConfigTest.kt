@@ -285,6 +285,33 @@ class PanelConfigTest {
     }
 
     @Test
+    fun `the update link is only honoured when it is a web link`() {
+        // It arrives from the panel, typed by an operator, and ends up in an
+        // ACTION_VIEW intent. `intent:` and an installed app's private scheme
+        // both resolve somewhere; neither is a store page.
+        fun urlOf(raw: String) =
+            PanelSettings.parse("""{"update_url":${'"'}$raw${'"'}}""").updateUrl
+
+        assertEquals("https://play.google.com/store/apps/details?id=x", urlOf("https://play.google.com/store/apps/details?id=x"))
+        assertEquals("http://example.com/app", urlOf("http://example.com/app"))
+        assertEquals("", urlOf("market://details?id=x"))
+        assertEquals("", urlOf("intent://evil"))
+        assertEquals("", urlOf("javascript:alert(1)"))
+        assertEquals("", urlOf(""))
+    }
+
+    @Test
+    fun `a missing update link is blank rather than a broken button`() {
+        // An operator can switch force_update on before filling the link in.
+        // Blank is what makes the screen draw no button at all.
+        assertEquals("", PanelSettings.empty().updateUrl)
+        assertEquals(
+            "",
+            PanelSettings.parse("""{"force_update":true,"min_version_code":800}""").updateUrl,
+        )
+    }
+
+    @Test
     fun `an empty panel response does not unlock anything`() {
         val s = PanelSettings.empty()
         assertEquals(PanelGate.Decision.RootBlocked, PanelGate.evaluate(s, 742, isRooted = true))

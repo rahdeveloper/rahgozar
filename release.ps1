@@ -57,7 +57,26 @@ if (git tag -l $tag) {
 
 if ($DryRun) { Write-Host "`n(dry run -- nothing built, nothing pushed)`n" -ForegroundColor Yellow; exit 0 }
 
-# --- 3. build ---------------------------------------------------------------
+# --- 3. gates ---------------------------------------------------------------
+#
+# Before anything is built, not after. These are cheap and they are the only
+# thing standing between a mistake and Play.
+#
+# lint earns its place here on evidence: a call to an API newer than minSdk sat
+# in the panel-discovery path for months, raising NoSuchMethodError -- an Error,
+# which the catch around it could not catch -- on every device older than
+# Android 13, on the one code path that runs when the panel domain is blocked.
+# Nothing in a normal build says a word about it. lint says it every time.
+Step 'Running the tests and lint'
+Push-Location app
+try {
+    .\gradlew.bat :app:testPlaystoreDebugUnitTest --console=plain
+    if ($LASTEXITCODE -ne 0) { Fail 'Unit tests failed. Nothing was built, nothing was tagged.' }
+    .\gradlew.bat :app:lintPlaystoreRelease --console=plain
+    if ($LASTEXITCODE -ne 0) { Fail 'lint found errors. Fix them or the release ships them.' }
+} finally { Pop-Location }
+
+# --- 4. build ---------------------------------------------------------------
 Step 'Building the release bundle for Play'
 Push-Location app
 try {
@@ -69,7 +88,7 @@ try {
     }
 } finally { Pop-Location }
 
-# --- 4. tag the commit the binary came from --------------------------------
+# --- 5. tag the commit the binary came from --------------------------------
 Step 'Tagging and publishing'
 if (-not (git tag -l $tag)) {
     git tag -a $tag -m "Rahgozar $versionName ($versionCode)"

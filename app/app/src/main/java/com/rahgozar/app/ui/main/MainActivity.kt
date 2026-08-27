@@ -21,6 +21,7 @@ import com.rahgozar.app.ads.SmartTunnel
 import com.rahgozar.app.core.LauncherManager
 import com.rahgozar.app.enums.PermissionType
 import com.rahgozar.app.extension.toast
+import com.rahgozar.app.enums.EConfigType
 import com.rahgozar.app.handler.MmkvManager
 import com.rahgozar.app.handler.SettingsChangeManager
 import com.rahgozar.app.handler.SettingsManager
@@ -541,8 +542,19 @@ class MainActivity : HelperBaseComponentActivity() {
      * one. The overall cap is a backstop only — past it the dial says the
      * same thing this dialog would.
      */
+    private fun selectedIsAether(): Boolean {
+        val guid = MmkvManager.getSelectServer() ?: return false
+        return MmkvManager.decodeServerConfig(guid)?.configType == EConfigType.AETHER
+    }
+
     private suspend fun awaitConnectSettled() {
-        withTimeoutOrNull(CONNECT_SETTLE_TIMEOUT_MS) {
+        // Aether reports success or failure itself, from the engine's own verdict
+        // (data confirmed, or every gateway exhausted), and its hunt can run a full
+        // thorough scan on a high-latency network. So wait for that verdict rather
+        // than the tighter window the Xray cores settle within — otherwise a slow
+        // connect is called failed here while it is, in fact, still coming up.
+        val settleTimeout = if (selectedIsAether()) AETHER_SETTLE_TIMEOUT_MS else CONNECT_SETTLE_TIMEOUT_MS
+        withTimeoutOrNull(settleTimeout) {
             while (true) {
                 homeViewModel.uiState.first { !it.isConnecting }
                 val flippedBack = withTimeoutOrNull(SETTLE_HOLD_MS) {
@@ -717,6 +729,12 @@ class MainActivity : HelperBaseComponentActivity() {
          */
         const val CONNECT_SETTLE_TIMEOUT_MS = 40_000L
 
+        // Aether's own verdict can take a full thorough scan on a bad network, so
+        // the connecting screen waits this long for it before calling it failed.
+        // The service still decides the outcome; this only stops the screen from
+        // pre-empting it.
+        const val AETHER_SETTLE_TIMEOUT_MS = 130_000L
+
         /**
          * How long «متصل شدید» stays before the home screen takes over.
          *
@@ -727,9 +745,27 @@ class MainActivity : HelperBaseComponentActivity() {
         const val CONNECTED_HOLD_MS = 1_400L
     }
 
+    /**
+     * Opens one of the panel's drawer links.
+     *
+     * Web schemes only. These strings arrive from the panel, which is trusted
+     * for a great deal already — but "trusted to name a privacy policy" is not
+     * the same as "trusted to hand this app an arbitrary URI to fire as an
+     * ACTION_VIEW intent". `intent:`, `file:` and an installed app's private
+     * scheme all resolve somewhere, and none of them is a policy page. A link
+     * is a web link; anything else is a mistake or an attack, and both should
+     * end the same way.
+     */
     private fun openUrl(url: String) {
+        val uri = runCatching { android.net.Uri.parse(url) }.getOrNull()
+        val scheme = uri?.scheme?.lowercase()
+        if (uri == null || (scheme != "http" && scheme != "https")) {
+            LogUtil.w(AppConfig.TAG, "drawer: refusing a link that is not http(s)")
+            toast(R.string.toast_failure)
+            return
+        }
         runCatching {
-            startActivity(Intent(Intent.ACTION_VIEW, android.net.Uri.parse(url)))
+            startActivity(Intent(Intent.ACTION_VIEW, uri))
         }.onFailure { toast(R.string.toast_failure) }
     }
 

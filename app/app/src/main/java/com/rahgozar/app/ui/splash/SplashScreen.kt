@@ -73,6 +73,8 @@ fun SplashScreen(
     phase: SplashPhase,
     failureReason: String,
     onRetry: () -> Unit,
+    canUpdate: Boolean = false,
+    onUpdate: () -> Unit = {},
 ) {
     val palette = LocalPalette.current
     Box(
@@ -104,7 +106,7 @@ fun SplashScreen(
             },
             label = "splash-frame",
         ) { isBrand ->
-            if (isBrand) BrandFrame() else SyncFrame(phase, failureReason, onRetry)
+            if (isBrand) BrandFrame() else SyncFrame(phase, failureReason, onRetry, canUpdate, onUpdate)
         }
     }
 }
@@ -264,7 +266,13 @@ private fun LoadingBar() {
  * tagline.
  */
 @Composable
-private fun SyncFrame(phase: SplashPhase, failureReason: String, onRetry: () -> Unit) {
+private fun SyncFrame(
+    phase: SplashPhase,
+    failureReason: String,
+    onRetry: () -> Unit,
+    canUpdate: Boolean,
+    onUpdate: () -> Unit,
+) {
     val palette = LocalPalette.current
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -328,6 +336,15 @@ private fun SyncFrame(phase: SplashPhase, failureReason: String, onRetry: () -> 
 
         when (phase) {
             SplashPhase.FAILED -> RetryButton(onRetry)
+            // Only when the operator gave us somewhere to send them. A button
+            // that opens nothing is worse than no button: it reads as an
+            // action the user has already taken and that did not work.
+            //
+            // And nothing in its place — not the tagline. "Entering a safe,
+            // open world" under "this version is no longer supported" promises
+            // the one thing this screen exists to refuse.
+            SplashPhase.UPDATE_REQUIRED -> if (canUpdate) UpdateButton(onUpdate)
+            SplashPhase.ROOT_BLOCKED -> Unit
             // Said where it is true and nowhere else: this is the only phase
             // that is waiting on an ad. The tagline gives up its place rather
             // than sitting next to it — two closing lines under one message is
@@ -483,6 +500,30 @@ private fun RetryButton(onRetry: () -> Unit) {
     }
 }
 
+/** The one action that helps a refused build. */
+@Composable
+private fun UpdateButton(onUpdate: () -> Unit) {
+    val palette = LocalPalette.current
+    Box(
+        Modifier
+            .clip(CircleShape)
+            .background(palette.accent.copy(alpha = 0.12f))
+            .padding(horizontal = 26.dp, vertical = 11.dp)
+            .clickableNoRipple(onUpdate),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            "Update",
+            style = TextStyle(
+                fontFamily = Brand.Vazirmatn,
+                fontWeight = FontWeight.Bold,
+                fontSize = 14.sp,
+                color = palette.accent,
+            ),
+        )
+    }
+}
+
 /**
  * Copy for a phase, in both languages.
  *
@@ -530,6 +571,19 @@ private fun messageFor(
             // The reason is a diagnostic, always in English: it comes from the
             // network layer and is what a support conversation quotes.
             subtitle = failureReason,
+        )
+
+        // Neither of these says "could not reach the panel", because the panel
+        // was reached and answered. Saying otherwise sends the user to check
+        // their connection over a problem their connection cannot fix.
+        SplashPhase.UPDATE_REQUIRED -> SplashMessage(
+            headline = "Update required",
+            subtitle = "This version is no longer supported",
+        )
+
+        SplashPhase.ROOT_BLOCKED -> SplashMessage(
+            headline = "This device is not supported",
+            subtitle = "Rooted devices are not served",
         )
     }
 }

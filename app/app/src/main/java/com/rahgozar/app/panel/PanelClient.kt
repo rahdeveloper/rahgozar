@@ -60,6 +60,8 @@ class PanelClient(
         @SerializedName("token") val token: String = "",
         @SerializedName("expires_at") val expiresAt: Long = 0,
         @SerializedName("keys") val keys: ServerKeys? = null,
+        /** The X25519 key this registration was issued for. Blank on an older panel. */
+        @SerializedName("public_key") val publicKey: String = "",
     )
 
     /**
@@ -93,6 +95,22 @@ class PanelClient(
             ) {
                 throw PanelException("this build is too old for the panel's current keys")
             }
+        }
+
+        // The panel echoes the key it issued this registration for, inside the
+        // signed bytes. A valid signature only proves the panel wrote it — not
+        // that it wrote it for *us* — so a registration envelope captured from
+        // somebody else's exchange would otherwise replay here perfectly: the
+        // signature verifies, the token is stored, and every config that
+        // follows fails to unwrap for as long as the token lives.
+        //
+        // Blank means an older panel that does not send it yet, which is
+        // accepted for the same reason the key check above is conditional: a
+        // staggered rollout must not lock installs out of registering.
+        if (registration.publicKey.isNotEmpty() &&
+            registration.publicKey != Base64Url.encode(device.publicKey)
+        ) {
+            throw PanelException("this registration was issued for another device")
         }
         return registration
     }

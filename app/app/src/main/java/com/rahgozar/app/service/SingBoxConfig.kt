@@ -50,6 +50,9 @@ object SingBoxConfig {
     /** Types that carry traffic somewhere, but never to a server of ours. */
     val LOCAL_TYPES = setOf("direct", "block", "dns")
 
+    /** Endpoint types whose tunnel is minted by a login. @see usesSessionLogin */
+    private val SESSION_LOGIN_TYPES = setOf("openconnect")
+
     /** Types that stand for other outbounds rather than being one. */
     val GROUP_TYPES = setOf("selector", "urltest")
 
@@ -447,6 +450,41 @@ object SingBoxConfig {
     }
 
     /**
+     * Whether this configuration's tunnel is a *logged-in session* on the
+     * server rather than a stateless outbound.
+     *
+     * Two things follow from that, and both of them broke this app.
+     *
+     * **It is not instant.** An AnyConnect gateway posts credentials over
+     * HTTPS, is handed a cookie, then negotiates CSTP over a second request
+     * before a single packet can move -- two seconds against a healthy ocserv,
+     * longer on a bad mobile network, where a VLESS or Shadowsocks server is
+     * already carrying traffic. Anything that asks in that window is told
+     * `endpoint is not ready yet` and reads it as a dead server.
+     *
+     * **There is only one of it.** The account holds the session, not the
+     * socket, so a second login is not a second connection -- it is a fight
+     * over the same one. Watched directly against this server: instance A came
+     * up in two seconds, instance B with the same credentials got
+     * `tunnel session was rejected: session rejected` and backed off 1s, 2s,
+     * 4s, 8s without ever connecting, while A's own resolver died mid-request
+     * with `use of closed network connection`. Neither instance was broken;
+     * asking twice was.
+     *
+     * So a session-login server is measured *through the tunnel it already
+     * has*, never by opening another one. See `HomeViewModel.verifyByTraffic`
+     * and `RealPingWorkerService.startRealPing`.
+     *
+     * Keyed on the endpoint type rather than on how the last attempt went,
+     * because the first attempt has nothing to go on and is the one that fails.
+     */
+    fun usesSessionLogin(blob: String): Boolean {
+        val config = runCatching { normalize(blob) }.getOrNull() ?: return false
+        val endpoints = config.getAsJsonArray("endpoints") ?: return false
+        return endpoints.any { (it as? JsonObject)?.string("type") in SESSION_LOGIN_TYPES }
+    }
+
+    /**
      * The address the server is actually dialled at, for the TCP-only test.
      *
      * The panel row carries `server`/`serverPort` fields too, but they are
@@ -473,7 +511,56 @@ object SingBoxConfig {
                 return host to port
             }
         }
+
+        // Endpoints that carry the whole address in one string: openconnect
+        // names its gateway as `server`, with no `server_port` and no peers.
+        //
+        // Missing this is not a cosmetic gap. Without an address here the tun
+        // never gets a `route_exclude_address` for the gateway, so the endpoint's
+        // own connection to it is routed *into the endpoint* — which cannot be
+        // ready until that connection completes. The core then answers every
+        // packet with "endpoint is not ready yet" and the tunnel never starts,
+        // with nothing in the log about the server at all.
+        config.getAsJsonArray("endpoints")?.forEach { element ->
+            val server = (element as? JsonObject)?.string("server") ?: return@forEach
+            hostAndPort(server)?.let { return it }
+        }
         return null
+    }
+
+    /**
+     * Splits `host`, `host:port` or `scheme://host:port/...` into its parts.
+     *
+     * Defaults to 443, which is what an AnyConnect gateway listens on and what
+     * sing-box itself assumes when the port is left off. IPv6 literals are
+     * bracketed in this notation, so the last colon only separates a port when
+     * it comes after the closing bracket.
+     */
+    fun hostAndPort(value: String, default: Int = 443): Pair<String, Int>? {
+        var text = value.trim()
+        if (text.isEmpty()) return null
+        text.indexOf("://").takeIf { it >= 0 }?.let { text = text.substring(it + 3) }
+        text = text.substringBefore('/').substringBefore('?')
+        if (text.isEmpty()) return null
+
+        if (text.startsWith("[")) {
+            val close = text.indexOf(']')
+            if (close < 0) return null
+            val host = text.substring(1, close)
+            val rest = text.substring(close + 1)
+            val port = rest.removePrefix(":").toIntOrNull()?.takeIf { it in 1..65535 } ?: default
+            return host.takeIf { it.isNotBlank() }?.to(port)
+        }
+
+        val colon = text.lastIndexOf(':')
+        if (colon <= 0 || text.indexOf(':') != colon) {
+            // No port, or a bare IPv6 literal — either way the whole string is
+            // the host.
+            return text.to(default)
+        }
+        val host = text.substring(0, colon)
+        val port = text.substring(colon + 1).toIntOrNull()?.takeIf { it in 1..65535 } ?: default
+        return host.takeIf { it.isNotBlank() }?.to(port)
     }
 
     // -------------------------------------------------------------- helpers --

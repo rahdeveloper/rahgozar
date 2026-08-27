@@ -5,6 +5,8 @@ import com.google.gson.annotations.SerializedName
 import com.rahgozar.app.util.LogUtil
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
 import java.util.concurrent.TimeUnit
 
 /**
@@ -213,12 +215,39 @@ internal object PanelDiscovery {
             // A body is read even on a non-200: some mirrors answer 403 with
             // the document, and the signature is the only thing that decides.
             response.body?.byteStream()?.let { stream ->
-                String(stream.readNBytes(MAX_BODY_BYTES.toInt()), Charsets.UTF_8)
+                String(stream.readAtMost(MAX_BODY_BYTES.toInt()), Charsets.UTF_8)
             }
         }
     } catch (e: Exception) {
         LogUtil.i(TAG, "discovery: $url unreachable — ${e.message}")
         null
+    }
+
+    /**
+     * Reads at most [limit] bytes, on every Android this app supports.
+     *
+     * Not `InputStream.readNBytes`, which is what this used to call and which
+     * exists only from API 33. Below that the platform has no such method, so
+     * the call raised `NoSuchMethodError` — and that is an **Error**, not an
+     * Exception, so the catch above never saw it. Discovery did not fall back
+     * to the next mirror; it died where it stood.
+     *
+     * Which made it a fault in exactly the wrong place. This path only runs
+     * when the panel's own domain cannot be reached, so it was broken on every
+     * device before Android 13 precisely when it was the only way back.
+     *
+     * The cap still matters: these documents come from mirrors nobody controls,
+     * and a signature is not checked until the body has already been read.
+     */
+    private fun InputStream.readAtMost(limit: Int): ByteArray {
+        val out = ByteArrayOutputStream(minOf(limit, DEFAULT_BUFFER_SIZE))
+        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+        while (out.size() < limit) {
+            val read = read(buffer, 0, minOf(buffer.size, limit - out.size()))
+            if (read < 0) break
+            out.write(buffer, 0, read)
+        }
+        return out.toByteArray()
     }
 
     /**

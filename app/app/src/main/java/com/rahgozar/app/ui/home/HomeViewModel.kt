@@ -1,6 +1,7 @@
 package com.rahgozar.app.ui.home
 
 import android.app.Application
+import android.os.SystemClock
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -17,6 +18,8 @@ import com.rahgozar.app.core.CoreServiceManager
 import com.rahgozar.app.dto.TestServiceMessage
 import com.google.gson.Gson
 import com.rahgozar.app.handler.MmkvManager
+import com.rahgozar.app.handler.SpeedtestManager
+import com.rahgozar.app.service.SingBoxConfig
 import com.rahgozar.app.panel.PanelStore
 import com.rahgozar.app.panel.PanelSync
 import com.rahgozar.app.ui.main.MainRepository
@@ -24,12 +27,14 @@ import com.rahgozar.app.ui.home.TAPE_SAMPLES
 import com.rahgozar.app.ui.main.MainServiceEvent
 import com.rahgozar.app.util.LogUtil
 import com.rahgozar.app.util.Reachability
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * The home screen's state, assembled from three sources: the service (is the
@@ -73,6 +78,9 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Bytes this tunnel had already moved when its verification started. */
     private var verifyBaselineBytes: Long = 0
+
+    /** The downlink half of the same baseline. @see trafficHasReturned */
+    private var verifyBaselineDownBytes: Long = 0
 
     /** True while a measurement round is allowed to choose a server. */
     private var autoPicking = false
@@ -217,10 +225,15 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
      * OpenVPN needs no such gate. Its CONNECTED already means a completed TLS
      * handshake, an accepted password and a pushed configuration — the server
      * cannot produce that and be dead.
+     *
+     * Aether is the same: its success signal is raised only after the engine has
+     * validated the MASQUE data-plane end-to-end (real bytes out and back through
+     * Cloudflare), so re-probing it here would just risk failing a slow,
+     * high-latency connect that has, in fact, already come up.
      */
     private fun onTunnelUp() {
         val guid = MmkvManager.getSelectServer()
-        if (selectedIsOpenVpn() || guid.isNullOrEmpty()) {
+        if (selectedIsOpenVpn() || selectedIsAether() || guid.isNullOrEmpty()) {
             setLink(LinkState.ON)
             // Same reason as the verified path below: whether the extend
             // offer is real was decided while this tun was built.
@@ -234,6 +247,7 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         // service and the UI's copy of them is whatever the last session left
         // behind until the first update of this one arrives.
         verifyBaselineBytes = _uiState.value.let { it.sessionDownBytes + it.sessionUpBytes }
+        verifyBaselineDownBytes = _uiState.value.sessionDownBytes
 
         // The test service, not the running core's own delay call.
         //
@@ -300,6 +314,21 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
                 return@launch
             }
 
+            // A server that allows one session cannot be asked twice.
+            //
+            // The measurement below is a whole second core dialling the same
+            // server — fine for a stateless protocol, and a direct attack on an
+            // AnyConnect gateway, where the account holds the session and the
+            // second login fights the first for it. On the device that is
+            // exactly what happened: the tunnel came up, the gate logged in
+            // again to measure it, the server answered
+            // `CSTP session closed during startup`, and the app disconnected a
+            // connection it had just made and then broken itself.
+            if (SingBoxConfig.usesSessionLogin(singboxConfigOf(guid))) {
+                verifyByTraffic(guid)
+                return@launch
+            }
+
             MmkvManager.clearAllTestDelayResults(listOf(guid))
             repository.sendMsg2TestService(
                 TestServiceMessage(
@@ -316,17 +345,129 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /**
-     * How long to wait for the verdict before calling it a failure.
+     * Verification for a server that will only hold one session: watch the
+     * tunnel it already has, instead of opening a second one to test it.
      *
-     * sing-box gets longer because its test is a heavier thing: the number
-     * comes from a whole core started in another process, where Xray's comes
-     * from a native call in a process that is already warm. Cutting sing-box
-     * off at Xray's deadline would disconnect servers that were about to
-     * answer — and a genuinely dead server still fails long before either
-     * deadline, so the extra patience costs nothing where it matters.
+     * The running core reports its own byte counters over the status stream
+     * every second, and they are already on screen as the speed tape. Bytes
+     * coming *back* are a stronger proof than any probe: they are the user's
+     * own traffic — the device's DNS, its push connections, whatever is open —
+     * having gone out through the endpoint and returned. Nothing arrives that
+     * way through a gateway that refused the login, because every connection
+     * through a dead endpoint is closed with `endpoint is not ready yet`.
+     *
+     * The number on the dial is then the round trip to the gateway itself.
+     * Measured from this process, which the tun excludes, so it is the real
+     * network distance to the server rather than a lap through the tunnel —
+     * and it is the same measurement the server list shows for these servers,
+     * so the two agree instead of contradicting each other.
      */
+    private suspend fun verifyByTraffic(guid: String) {
+        var deadline = SystemClock.elapsedRealtime() + verifyTimeoutFor(guid)
+        var awake = false
+        while (SystemClock.elapsedRealtime() < deadline) {
+            delay(TRAFFIC_POLL_MS)
+            if (verifyGuid != guid) return
+
+            // The first byte back is the endpoint saying it exists, and it is a
+            // different event from the proof this loop is waiting for.
+            //
+            // Measured on the device against this gateway: for the first
+            // nineteen seconds every connection through the tunnel is refused
+            // with `endpoint is not ready yet` while AnyConnect blocks on its
+            // DTLS handshake, and *nothing* comes back — so a thirty-second
+            // budget spends two thirds of itself before the tunnel can carry
+            // anything, leaving about eleven seconds in which some other app on
+            // the phone has to happen to ask for something. On a quiet phone it
+            // does not, and a working tunnel is torn down for being quiet.
+            //
+            // So the clock restarts when the endpoint wakes up. This can only
+            // ever extend the window, never shorten it: a gateway that is
+            // simply dead sends no first byte and is still judged on the
+            // original deadline.
+            if (!awake && downlinkSinceBaseline() > 0) {
+                awake = true
+                deadline = maxOf(
+                    deadline,
+                    SystemClock.elapsedRealtime() + TRAFFIC_PROOF_WINDOW_MS,
+                )
+            }
+
+            if (!trafficHasReturned()) continue
+
+            val rtt = gatewayRttFor(guid)
+            if (verifyGuid != guid) return
+            // The list row would otherwise keep whatever it was showing before
+            // this connection, which is the one place the two numbers can
+            // disagree now that they are the same measurement.
+            MmkvManager.encodeServerTestDelayMillis(guid, rtt)
+            _serversRevision.value = _serversRevision.value + 1
+            onVerified(rtt)
+            return
+        }
+        // Nothing came back. failVerification re-reads the counters itself, so
+        // a tunnel that started carrying in the last moment still survives.
+        failVerification()
+    }
+
+    /**
+     * Whether anything has come *back* through the tunnel since the gate armed.
+     *
+     * A different question from [trafficIsMoving], and deliberately a much
+     * cheaper one to answer yes to. That one separates "carrying" from
+     * "connected and idle", because it is overruling a probe that said the
+     * server was dead. This one has no probe to overrule: it is asking whether
+     * the endpoint exists at all, and a gateway that never came up returns
+     * *exactly zero* — every connection through it is refused inside the core
+     * with `endpoint is not ready yet`, so nothing is ever copied and neither
+     * counter moves.
+     *
+     * Sized against what an idle phone actually does. Measured on the device: a
+     * working AnyConnect tunnel that had been up for eight seconds had carried
+     * three connections — a push socket and two Google requests — which is real
+     * proof and nowhere near 64 KB. Judged by the busy-tunnel threshold it
+     * failed, and a connection that was working was torn down for being quiet.
+     *
+     * Downlink only. Bytes we sent prove we tried; bytes that arrived prove
+     * there is something on the other end.
+     */
+    private fun trafficHasReturned(): Boolean =
+        downlinkSinceBaseline() >= VERIFY_TRAFFIC_PROOF_BYTES
+
+    /** Bytes that have come back through the tunnel since this attempt began. */
+    private fun downlinkSinceBaseline(): Long =
+        _uiState.value.sessionDownBytes - verifyBaselineDownBytes
+
+    /** The round trip to the gateway this configuration dials, or 0 if unknown. */
+    private suspend fun gatewayRttFor(guid: String): Long {
+        val endpoint = SingBoxConfig.endpointOf(singboxConfigOf(guid)) ?: return 0L
+        return withContext(Dispatchers.IO) {
+            SpeedtestManager.socketConnectTime(endpoint.first, endpoint.second, GATEWAY_RTT_TIMEOUT_MS)
+        }.coerceAtLeast(0L)
+    }
+
+    /**
+     * This profile's sing-box configuration, or empty if it has none.
+     *
+     * It lives on the profile itself, *not* in the raw-config store: that store
+     * holds the JSON of a CUSTOM (Xray) profile, and asking it for a sing-box
+     * server's blob returns null every single time.
+     *
+     * Worth stating because reading the wrong one fails silently and looks like
+     * nothing: every question asked of the blob is then asked about an empty
+     * string, every answer comes back "no", and an AnyConnect server goes on
+     * being treated as an ordinary outbound with no error anywhere to say why.
+     */
+    private fun singboxConfigOf(guid: String): String {
+        val profile = MmkvManager.decodeServerConfig(guid) ?: return ""
+        if (profile.configType != EConfigType.SINGBOX) return ""
+        return profile.singboxConfig.orEmpty()
+    }
+
     private fun verifyTimeoutFor(guid: String): Long =
-        if (MmkvManager.decodeServerConfig(guid)?.configType == EConfigType.SINGBOX) {
+        if (SingBoxConfig.usesSessionLogin(singboxConfigOf(guid))) {
+            SESSION_LOGIN_VERIFY_TIMEOUT_MS
+        } else if (MmkvManager.decodeServerConfig(guid)?.configType == EConfigType.SINGBOX) {
             SINGBOX_VERIFY_TIMEOUT_MS
         } else {
             VERIFY_TIMEOUT_MS
@@ -414,6 +555,11 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
     private fun selectedIsOpenVpn(): Boolean {
         val guid = MmkvManager.getSelectServer() ?: return false
         return MmkvManager.decodeServerConfig(guid)?.configType == EConfigType.OPENVPN
+    }
+
+    private fun selectedIsAether(): Boolean {
+        val guid = MmkvManager.getSelectServer() ?: return false
+        return MmkvManager.decodeServerConfig(guid)?.configType == EConfigType.AETHER
     }
 
     /**
@@ -823,6 +969,21 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         const val SINGBOX_VERIFY_TIMEOUT_MS = 22_000L
 
         /**
+         * The same, where the tunnel does not exist yet when its core does.
+         *
+         * An AnyConnect endpoint blocks on its first DTLS attempt before it
+         * will carry anything, and that attempt is allowed 15 seconds — so on a
+         * gateway whose DTLS goes unanswered there is nothing to observe for
+         * the first seventeen. Under the old 22s the tunnel came up with eight
+         * seconds to spare, did not move enough in them, and was disconnected
+         * while working. This leaves it about twenty seconds of being watched
+         * rather than eight, and still lands well inside the connect dialog's
+         * own 40s backstop (`MainActivity.CONNECT_SETTLE_TIMEOUT_MS`) once
+         * [VERIFY_SETTLE_MS] is added in front.
+         */
+        const val SESSION_LOGIN_VERIFY_TIMEOUT_MS = 30_000L
+
+        /**
          * How long the tun is left alone before anything measures through it.
          *
          * The tunnel's own arrival rearranges the device's default interface,
@@ -830,6 +991,21 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
          * rather than the server.
          */
         const val VERIFY_SETTLE_MS = 2_500L
+
+        /**
+         * How often the traffic counters are re-read while verifying.
+         *
+         * The core pushes them once a second, so anything faster only re-reads
+         * the same numbers.
+         */
+        const val TRAFFIC_POLL_MS = 1_000L
+
+        /**
+         * How long the gateway gets to accept a TCP connection for the number
+         * on the dial. Generous: a failure here costs a "0ms" on a connection
+         * that has already proved itself by carrying traffic.
+         */
+        const val GATEWAY_RTT_TIMEOUT_MS = 4_000
 
         /**
          * Traffic that overrules a failed probe.
@@ -840,6 +1016,33 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
          * used.
          */
         const val VERIFY_TRAFFIC_FLOOR_BYTES = 64L * 1024L
+
+        /**
+         * Downlink that proves the tunnel exists. @see trafficHasReturned
+         *
+         * Above a stray retransmission, and below anything a phone with a
+         * screen on fails to reach the moment a tunnel starts carrying —
+         * because the alternative reading of "not yet" is a working server
+         * disconnected for being quiet.
+         */
+        const val VERIFY_TRAFFIC_PROOF_BYTES = 4L * 1024L
+
+        /**
+         * How long the tunnel gets to prove itself once it has woken up.
+         *
+         * Separate from the budget it starts with, because the two measure
+         * different things. The starting budget covers *getting* a usable
+         * endpoint — for AnyConnect that is a login plus a DTLS handshake the
+         * client allows fifteen seconds, and on this gateway readiness lands
+         * around the nineteenth second. This one covers *watching* one, and it
+         * begins when the first byte comes back.
+         *
+         * Fifteen seconds is long enough for the phone's own background
+         * traffic — DNS, a push socket — to move four kilobytes, which is what
+         * the proof asks for, without leaving a user staring at a dial that is
+         * never going to turn green.
+         */
+        const val TRAFFIC_PROOF_WINDOW_MS = 15_000L
 
         /**
          * How long before the end the user is warned.

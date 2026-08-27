@@ -44,6 +44,17 @@ internal object SingBoxDelayBridge {
     private const val MEASURE_TIMEOUT_MS = 13_000L
 
     /**
+     * The same, for a tunnel the test process has to wait to exist: its
+     * `READY_DEADLINE_MS` of polling, then one full-length probe on top.
+     *
+     * This side has to know, because a deadline here that is shorter than the
+     * one over there does not report a slow server — it reports nothing, gives
+     * up on a measurement still running, and leaves the row looking dead for a
+     * reason that is entirely ours.
+     */
+    private const val SESSION_LOGIN_MEASURE_TIMEOUT_MS = 30_000L
+
+    /**
      * How long a request may wait for its turn. Generous because the queue
      * ahead of it is legitimate work — a long list of sing-box servers is
      * measured one at a time — and because process death is reported through
@@ -169,10 +180,15 @@ internal object SingBoxDelayBridge {
                 return FAILED
             }
 
-            if (slot.finished.await(MEASURE_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+            val budget = if (SingBoxTestConfig.usesSessionLogin(config)) {
+                SESSION_LOGIN_MEASURE_TIMEOUT_MS
+            } else {
+                MEASURE_TIMEOUT_MS
+            }
+            if (slot.finished.await(budget, TimeUnit.MILLISECONDS)) {
                 slot.delay
             } else {
-                LogUtil.w(AppConfig.TAG, "$TAG: no answer within ${MEASURE_TIMEOUT_MS}ms of starting")
+                LogUtil.w(AppConfig.TAG, "$TAG: no answer within ${budget}ms of starting")
                 FAILED
             }
         } catch (e: Exception) {

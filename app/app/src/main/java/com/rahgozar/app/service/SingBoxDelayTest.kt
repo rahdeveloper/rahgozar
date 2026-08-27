@@ -60,6 +60,29 @@ internal object SingBoxDelayTest {
     private const val TRANSITION_SETTLE_MS = 1_200L
 
     /**
+     * How long a tunnel that is minted by a login gets to come into existence
+     * before the server is called dead.
+     *
+     * Sized by the thing that actually decides it, which is not the login. An
+     * AnyConnect gateway authenticates in about two seconds — but the client
+     * then blocks on its first DTLS attempt before declaring the endpoint
+     * usable, and `anyConnectDTLSHandshake` in sing-openconnect is **15
+     * seconds**. Where DTLS answers, or fails outright, the endpoint is ready
+     * almost at once; where the handshake is simply lost — which this server
+     * does intermittently — nothing can be carried for a quarter of a minute
+     * and the core says only `endpoint is not ready yet`.
+     *
+     * A fixed wait was tried first and was wrong twice over: four seconds was
+     * far too short for the bad case, and every server would have paid it in
+     * the good case. This is a ceiling on *polling*, so a gateway that comes up
+     * in two seconds is measured in two seconds.
+     */
+    private const val READY_DEADLINE_MS = 20_000L
+
+    /** How often readiness is re-asked. A refused attempt returns instantly. */
+    private const val READY_POLL_MS = 1_000L
+
+    /**
      * One core at a time in this process.
      *
      * Not a limitation of sing-box but of the setup around it: libbox's paths
@@ -99,8 +122,10 @@ internal object SingBoxDelayTest {
             return FAILED
         }
 
+        val readyDeadlineMs = if (SingBoxTestConfig.usesSessionLogin(config)) READY_DEADLINE_MS else 0L
+
         return try {
-            val first = attempt(server, testConfig, port, testUrl)
+            val first = attempt(server, testConfig, port, testUrl, readyDeadlineMs)
             // One retry, and only for the failure this app causes itself.
             //
             // This measurement usually runs while a tunnel is coming up, and
@@ -114,10 +139,15 @@ internal object SingBoxDelayTest {
             // slow server must not be able to hide inside a second attempt), so
             // this one is deliberately narrow — it fires only for a transition,
             // and only once.
-            if (first == FAILED && lastFailureWasTransition) {
+            //
+            // Not on the polling path: that already survived every reset for
+            // twenty seconds, so a reset there is the answer rather than an
+            // interruption, and restarting the core would only double the wait
+            // before the same verdict.
+            if (first == FAILED && readyDeadlineMs == 0L && lastFailureWasTransition) {
                 LogUtil.i(AppConfig.TAG, "$TAG: the network moved under the probe — measuring again")
                 Thread.sleep(TRANSITION_SETTLE_MS)
-                attempt(server, testConfig, port, testUrl)
+                attempt(server, testConfig, port, testUrl, readyDeadlineMs)
             } else {
                 first
             }
@@ -146,6 +176,7 @@ internal object SingBoxDelayTest {
         testConfig: String,
         port: Int,
         testUrl: String,
+        readyDeadlineMs: Long,
     ): Long {
         try {
             server.startOrReloadService(testConfig, OverrideOptions())
@@ -156,7 +187,29 @@ internal object SingBoxDelayTest {
             lastFailureWasTransition = false
             return FAILED
         }
-        return probe(port, testUrl)
+
+        // Most tunnels exist as soon as their core does, and are asked at once.
+        if (readyDeadlineMs <= 0L) return probe(port, testUrl)
+
+        // The rest have to be waited for. A request sent before the endpoint
+        // is ready is refused inside the core with `endpoint is not ready
+        // yet`, which arrives here as `Connection reset` — indistinguishable
+        // from a dead server by looking at it, and it was being read as one.
+        //
+        // So it is asked repeatedly instead of guessed at: a refusal costs a
+        // few milliseconds, the first answer is the measurement, and only the
+        // request that succeeds is ever timed. See [READY_DEADLINE_MS] for why
+        // the window has to be as wide as it is.
+        val deadline = SystemClock.elapsedRealtime() + readyDeadlineMs
+        while (true) {
+            val result = probe(port, testUrl)
+            if (result != FAILED) return result
+            if (SystemClock.elapsedRealtime() >= deadline) {
+                LogUtil.i(AppConfig.TAG, "$TAG: no tunnel after ${readyDeadlineMs}ms — reporting dead")
+                return FAILED
+            }
+            Thread.sleep(READY_POLL_MS)
+        }
     }
 
     /**

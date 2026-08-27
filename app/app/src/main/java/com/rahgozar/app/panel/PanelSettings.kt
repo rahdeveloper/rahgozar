@@ -38,6 +38,19 @@ class PanelSettings private constructor(private val json: JsonObject) {
 
     val minVersionCode: Int get() = int("min_version_code", 0)
 
+    /**
+     * Where to send a user whose build has been refused.
+     *
+     * Blank is a real answer and the default: an operator who switched
+     * [forceUpdate] on before filling this in gets a screen that explains
+     * itself and no button, rather than a button that goes nowhere. Only
+     * http(s) is honoured — this string arrives from the panel and ends up in
+     * an Intent, and no other scheme has a reason to be opened here.
+     */
+    val updateUrl: String get() = string("update_url").trim().takeIf {
+        it.startsWith("https://") || it.startsWith("http://")
+    }.orEmpty()
+
     // ------------------------------------------------------------ security --
 
     /**

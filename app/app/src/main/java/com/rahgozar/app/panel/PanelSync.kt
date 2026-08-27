@@ -165,32 +165,90 @@ object PanelSync {
         // Every address worth trying, best first — the one that worked last
         // time, then whatever a bundle taught us, then the baked list.
         val known = PanelDiscovery.candidates(discovery)
-        var outcome = attempt(context, client, device, known, nowSeconds, force, onStage)
-
-        // Only a *verified* answer ends the search.
-        //
-        // Ready and Blocked both came out of a document signed with the panel's
-        // key, so they are the panel speaking and there is nothing to look for.
-        // Every other outcome is unverified by definition — including the ones
-        // that look conclusive, because "401" and an error code are read from
-        // a plain HTTP response that no signature covers. Anything holding a
-        // certificate for this hostname could produce one, and treating it as
-        // final would let a single intercepted address pin the app there for
-        // good. So the mirrors get asked. On a device the panel really has
-        // refused this costs one request: the first mirror is the panel's own
-        // endpoint, it serves the version already known, and no address is
-        // retried because none is new.
-        if (outcome is Result.Unavailable) {
-            onStage(Stage.RESOLVING)
-            val discovered = PanelDiscovery.refresh(discovery, signKey, nowSeconds) - known.toSet()
-            if (discovered.isNotEmpty()) {
-                LogUtil.i(TAG, "panel: ${discovered.size} new address(es) from discovery")
-                outcome = attempt(context, client, device, discovered, nowSeconds, force, onStage)
-            }
-        }
+        val outcome = search(
+            known = known,
+            tryAddresses = { urls ->
+                attempt(context, client, device, urls, nowSeconds, force, onStage)
+            },
+            askMirrors = {
+                onStage(Stage.RESOLVING)
+                PanelDiscovery.refresh(discovery, signKey, nowSeconds)
+            },
+        )
 
         if (outcome is Result.Unavailable) onStage(Stage.FAILED)
         outcome
+    }
+
+    /**
+     * The search: try what we already know, and if none of it answered *as the
+     * panel*, ask the mirrors and try what they hand back.
+     *
+     * This is the sequence the app's survival rests on — a blocked domain is
+     * the ordinary case where it is used — so it is written as a function over
+     * its two effects rather than inline above. Both effects need a Context, a
+     * device key and a network; the decisions between them need none of that,
+     * and it is the decisions that must not quietly change. See
+     * `PanelSearchTest`, which drives this with the effects faked and asserts
+     * the order they happen in.
+     *
+     * **Only a verified answer ends it.** Ready and Blocked came out of a
+     * document signed with the panel's key, so they are the panel speaking and
+     * there is nothing left to look for. Every other outcome is unverified by
+     * definition — including the ones that look conclusive, because a "401" and
+     * an error code are read from a plain HTTP response that no signature
+     * covers. Anything holding a certificate for that hostname could produce
+     * one, and treating it as final would let a single intercepted address pin
+     * the app there for good. So the mirrors get asked even then. On a device
+     * the panel really has refused, that costs one request: the first mirror is
+     * the panel's own endpoint, it serves the version already known, and no
+     * address is retried because none is new.
+     */
+    /**
+     * Whether an offered configuration is older than the one already applied.
+     *
+     * Extracted so the rule can be tested without a store or a network, like
+     * [search] beside it. Two properties matter and both are easy to get wrong:
+     *
+     *  - **Zero is not old, it is absent.** A panel that does not send a version
+     *    at all must still be obeyed, or a newer app meeting an older panel
+     *    refuses everything it is offered and has no way back.
+     *  - **Equal is not old.** The same version arrives legitimately whenever a
+     *    device is forced to take the full response — a schema bump, a cleared
+     *    ETag — and refusing it would strand exactly the installs that were
+     *    being repaired.
+     */
+    internal fun isReplayedConfig(offered: Long, applied: Long): Boolean =
+        offered in 1 until applied
+
+    internal suspend fun search(
+        known: List<String>,
+        tryAddresses: suspend (List<String>) -> Result,
+        askMirrors: suspend () -> List<String>,
+    ): Result {
+        val outcome = tryAddresses(known)
+        if (outcome !is Result.Unavailable) return outcome
+
+        // A lookup, not the sync. Discovery is the way out of a block, and a
+        // fault inside it must cost the app that way out and nothing more —
+        // certainly not the process. Throwable rather than Exception on
+        // purpose: the last bug found on this path raised NoSuchMethodError,
+        // which is an Error, and an `Exception` catch stepped straight over it.
+        val discovered = try {
+            askMirrors()
+        } catch (t: Throwable) {
+            LogUtil.e(TAG, "panel: discovery itself failed", t)
+            emptyList()
+        }
+
+        // Minus what was just tried. Re-dialling an address that failed moments
+        // ago cannot succeed, and on a censored network it is the difference
+        // between asking a mirror and hammering a blocked host twice.
+        val fresh = discovered - known.toSet()
+        if (fresh.isEmpty()) return outcome
+
+        LogUtil.i(TAG, "panel: ${fresh.size} new address(es) from discovery")
+        return tryAddresses(fresh)
     }
 
     /**
@@ -260,6 +318,12 @@ object PanelSync {
                 // A fresh registration invalidates any cached ETag: the new
                 // device has never been told anything.
                 PanelStore.etag = ""
+                // And the version high-water mark below with it. Config
+                // versions count per product, so a device that registers into
+                // a different one legitimately sees a lower number — treating
+                // that as a rollback would leave it refusing every config it
+                // was ever offered.
+                PanelStore.configVersion = 0
                 LogUtil.i(TAG, "panel: registered as ${registration.deviceId}")
             }
 
@@ -292,6 +356,30 @@ object PanelSync {
                 LogUtil.w(TAG, "panel: refused by gate — $gate")
                 onStage(Stage.FAILED)
                 return@withContext Result.Blocked(gate, settings)
+            }
+
+            // A signed response that is genuinely ours but *older* than what we
+            // already applied is a replay: an intercepting proxy holding a
+            // recorded response can serve it back forever, undoing an emergency
+            // server rotation or reversing a forced update, and every signature
+            // still checks out. BundleReader has enforced exactly this rule for
+            // discovery bundles from the start; this path never did.
+            //
+            // Two deliberate escapes. A response carrying no version at all is
+            // applied — an older panel must not brick a newer app. And a
+            // refusal keeps the stored configuration and carries on rather than
+            // failing the launch: the device stays on the servers it has, which
+            // is what it already does when the panel cannot be reached.
+            val offered = result.bootstrap?.configVersion ?: 0L
+            if (isReplayedConfig(offered, PanelStore.configVersion)) {
+                LogUtil.w(
+                    TAG,
+                    "panel: refusing config v" + offered +
+                        ", older than the applied v" + PanelStore.configVersion,
+                )
+                val replay = cachedConfig()
+                onStage(Stage.DONE)
+                return@withContext Result.Ready(changed = false, replay.first, replay.second)
             }
 
             onStage(Stage.APPLYING)
@@ -348,6 +436,20 @@ object PanelSync {
                     Result.Unavailable("this build is not registered with the panel", fatal = true)
                 else -> Result.Unavailable(e.message ?: "panel unreachable")
             }
+        } catch (e: PanelCryptoException) {
+            // The panel answered, the signature verified, and this device still
+            // cannot open the payload — so the content key was not wrapped to
+            // this device's key. A replayed registration does exactly that, and
+            // because the token itself stays valid the old code sat in this
+            // state until the token expired: up to thirty days on a fresh
+            // install, with no servers and nothing in the UI to explain it.
+            //
+            // Registering again is the app's only recovery, and this is a
+            // definition rather than a guess: a credential whose payloads this
+            // device cannot decrypt is not this device's credential.
+            LogUtil.w(TAG, "panel: payload will not decrypt — registering again", e)
+            PanelStore.clearRegistration()
+            Result.Unavailable("registration expired", answered = true)
         } catch (e: Exception) {
             LogUtil.i(TAG, "panel: $url failed — ${e.message}")
             Result.Unavailable(e.message ?: "sync failed")

@@ -1,11 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
+<resources xmlns:tools="http://schemas.android.com/tools">
     <!-- Night theme: override window background and status bar flags for dark mode -->
     <style name="AppThemeBase" parent="@android:style/Theme.Material.NoActionBar">
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar">false</item>
-        <item name="android:windowLightNavigationBar">false</item>
+        <!-- API 27+. Older platforms ignore an unknown theme attribute, so this
+             is inert there rather than wrong; tools:targetApi says so to lint,
+             which was failing the release check over it. -->
+        <item name="android:windowLightNavigationBar" tools:targetApi="27">false</item>
         <item name="android:windowBackground">@color/window_background_dark</item>
     </style>
 

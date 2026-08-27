@@ -99,4 +99,7 @@ object SingBoxTestConfig {
 
     /** @see SingBoxConfig.endpointOf */
     fun endpointOf(config: String): Pair<String, Int>? = SingBoxConfig.endpointOf(config)
+
+    /** @see SingBoxConfig.usesSessionLogin */
+    fun usesSessionLogin(config: String): Boolean = SingBoxConfig.usesSessionLogin(config)
 }

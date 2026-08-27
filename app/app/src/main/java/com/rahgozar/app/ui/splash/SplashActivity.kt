@@ -11,6 +11,8 @@ import androidx.activity.viewModels
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.rahgozar.app.AppConfig
+import com.rahgozar.app.util.LogUtil
 import androidx.lifecycle.lifecycleScope
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -70,6 +72,30 @@ class SplashActivity : ComponentActivity() {
         )
         finish()
         overridePendingTransition(0, 0)
+    }
+
+    /**
+     * Opens the store page a refused build was told to send the user to.
+     *
+     * The scheme is checked again here even though [com.rahgozar.app.panel.PanelSettings]
+     * already refused anything but http(s). This value crosses a trust boundary
+     * — it is typed into the panel by an operator and arrives over the network
+     * — and the check that matters is the one next to the Intent, where a
+     * later refactor cannot quietly leave it behind.
+     *
+     * The splash does not finish afterwards. The user comes back to the same
+     * screen, which is correct: nothing about this device has changed until
+     * they actually install the update.
+     */
+    private fun openStore(url: String) {
+        val uri = runCatching { android.net.Uri.parse(url) }.getOrNull()
+        val scheme = uri?.scheme?.lowercase()
+        if (uri == null || (scheme != "http" && scheme != "https")) {
+            LogUtil.w(AppConfig.TAG, "splash: refusing an update link that is not http(s)")
+            return
+        }
+        runCatching { startActivity(Intent(Intent.ACTION_VIEW, uri)) }
+            .onFailure { LogUtil.w(AppConfig.TAG, "splash: nothing can open the update link") }
     }
 
     /**
@@ -196,10 +222,13 @@ class SplashActivity : ComponentActivity() {
                             isAppearanceLightNavigationBars = !dark
                         }
                 }
+                val storeUrl by viewModel.updateUrl.collectAsStateWithLifecycle()
                 SplashScreen(
                     phase = phase,
                     failureReason = reason,
                     onRetry = viewModel::retry,
+                    canUpdate = storeUrl.isNotEmpty(),
+                    onUpdate = { openStore(storeUrl) },
                 )
             }
         }

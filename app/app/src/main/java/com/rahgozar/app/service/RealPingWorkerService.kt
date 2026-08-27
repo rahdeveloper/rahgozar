@@ -1,6 +1,7 @@
 package com.rahgozar.app.service
 
 import android.content.Context
+import com.rahgozar.app.AppConfig
 import com.rahgozar.app.core.CoreConfigManager
 import com.rahgozar.app.core.CoreNativeManager
 import com.rahgozar.app.dto.RealPingEvent
@@ -10,6 +11,7 @@ import com.rahgozar.app.extension.isNotNullEmpty
 import com.rahgozar.app.handler.MmkvManager
 import com.rahgozar.app.handler.SettingsManager
 import com.rahgozar.app.handler.SpeedtestManager
+import com.rahgozar.app.util.LogUtil
 import com.rahgozar.app.util.Utils
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineName
@@ -127,6 +129,34 @@ class RealPingWorkerService(
         if (config.configType == EConfigType.SINGBOX) {
             val singboxConfig = config.singboxConfig
             if (singboxConfig.isNullOrBlank()) return retFailure
+
+            // Except where the server is already carrying the user's session.
+            //
+            // The test below is a second core dialling the same server. For a
+            // gateway whose tunnel is a *login*, that second login is not
+            // necessarily a second connection — where the account allows one
+            // session it is a fight over the one in use, and either side can
+            // lose: the newcomer refused with `session rejected`, or the live
+            // tunnel dropped with `CSTP session closed during startup`. Tapping
+            // "test all" would then disconnect the user from the very server it
+            // was supposed to be timing.
+            //
+            // Narrow on purpose. The danger is a session *already held*, not
+            // the login itself, so it is only refused for the server that is up
+            // right now — a Cisco row measured while nothing is connected, or
+            // while a different server is, dials normally and reports a real
+            // number. That matters because the alternative is reachability, and
+            // a TCP connect is a smaller number than a request through a
+            // tunnel: measuring one row on a different scale from the rest
+            // hands it every auto-pick it should not win.
+            if (SingBoxTestConfig.usesSessionLogin(singboxConfig) && isTheLiveTunnel(guid)) {
+                LogUtil.i(
+                    AppConfig.TAG,
+                    "probe: ${config.remarks} is the live session — timing the gateway instead of logging in again",
+                )
+                return measureSingBoxReach(config.server, config.serverPort, singboxConfig)
+            }
+
             return SingBoxDelayBridge.measure(
                 context,
                 singboxConfig,
@@ -229,6 +259,17 @@ class RealPingWorkerService(
      * The address comes from the configuration rather than the panel row's
      * `server` field, because the configuration is what the core dials.
      */
+    /**
+     * Whether this server is the one a tunnel is running for right now.
+     *
+     * Both halves are needed and neither is enough. [TunnelState] asks
+     * ActivityManager which services are alive — the only source that can see
+     * all three cores — but it does not say *which* server; the selection does,
+     * but it is just as true when nothing is connected.
+     */
+    private fun isTheLiveTunnel(guid: String): Boolean =
+        MmkvManager.getSelectServer() == guid && TunnelState.isRunning(context)
+
     private fun measureSingBoxReach(server: String?, serverPort: String?, config: String?): Long {
         val endpoint = config?.let { SingBoxTestConfig.endpointOf(it) }
         val host = endpoint?.first ?: server.orEmpty()

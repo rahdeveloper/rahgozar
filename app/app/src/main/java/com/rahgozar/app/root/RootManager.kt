@@ -6,7 +6,6 @@ import com.rahgozar.app.root.RootManager.refresh
 import com.rahgozar.app.util.LogUtil
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.util.concurrent.TimeUnit
 
 /**
  * Detects whether the device grants root (`su`) access.
@@ -41,13 +40,16 @@ object RootManager {
         result
     }
 
+    /** Generous: `su` on a rooted device may wait on the user's approval dialog. */
+    private const val PROBE_TIMEOUT_MS = 10_000L
+
     private fun probe(): Boolean {
         return try {
             val process = ProcessBuilder("su", "-c", "id -u")
                 .redirectErrorStream(true)
                 .start()
             val output = process.inputStream.bufferedReader().use { it.readText() }.trim()
-            val finished = process.waitFor(10, TimeUnit.SECONDS)
+            val finished = process.waitForCompat(PROBE_TIMEOUT_MS)
             if (!finished) {
                 process.destroy()
                 LogUtil.w(AppConfig.TAG, "RootManager: su probe timed out")

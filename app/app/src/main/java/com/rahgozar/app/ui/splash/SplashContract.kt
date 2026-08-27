@@ -48,6 +48,20 @@ enum class SplashPhase {
 
     /** The panel refused this device, or could not be reached at all. */
     FAILED,
+
+    /**
+     * The panel answered, and the answer was "this build is too old".
+     *
+     * Its own phase because [FAILED] would be a lie twice over: the panel was
+     * reached, and the Try-again button that phase draws can never help — the
+     * version is not going to change by asking again. This one offers the one
+     * action that does help, when the operator has configured somewhere to
+     * send the user.
+     */
+    UPDATE_REQUIRED,
+
+    /** The panel does not serve rooted devices, and this one is rooted. */
+    ROOT_BLOCKED,
 }
 
 /**
@@ -77,7 +91,13 @@ sealed interface SplashOutcome {
      */
     data object AdFlow : SplashOutcome
 
-    /** The panel will not serve this build or this device. */
+    /**
+     * The panel will not serve this build or this device.
+     *
+     * The splash stays put. There is no screen behind this one to fall through
+     * to: a refused device has no configuration it is allowed to use, so
+     * opening the app would mean opening it onto whatever it had before.
+     */
     data class Refused(val decision: PanelGate) : SplashOutcome
 
     data object Unreachable : SplashOutcome

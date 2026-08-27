@@ -10,6 +10,7 @@ import com.rahgozar.app.handler.SettingsManager
 import com.rahgozar.app.panel.AdManager
 import com.rahgozar.app.panel.AdSlot
 import com.rahgozar.app.panel.AdsConfig
+import com.rahgozar.app.panel.PanelGate as PanelGateRules
 import com.rahgozar.app.panel.PanelSync
 import com.rahgozar.app.panel.TunnelSettings
 import com.rahgozar.app.util.LogUtil
@@ -49,6 +50,17 @@ class SplashViewModel(app: Application) : AndroidViewModel(app) {
     /** Set when the sync failed, so the screen can say what went wrong. */
     private val _failureReason = MutableStateFlow("")
     val failureReason: StateFlow<String> = _failureReason.asStateFlow()
+
+    /**
+     * Where a refused build should send the user, or blank for nowhere.
+     *
+     * Read off the settings that came with the refusal rather than from the
+     * stored configuration: a device that has never synced successfully has no
+     * stored configuration, and it is exactly the device most likely to be too
+     * old to be served.
+     */
+    private val _updateUrl = MutableStateFlow("")
+    val updateUrl: StateFlow<String> = _updateUrl.asStateFlow()
 
     /** When the current message went up, so each one gets its full dwell. */
     private var phaseSetAt = 0L
@@ -148,7 +160,18 @@ class SplashViewModel(app: Application) : AndroidViewModel(app) {
 
             is PanelSync.Result.Blocked -> {
                 AdManager.apply(getApplication(), AdsConfig.disabled())
-                show(SplashPhase.FAILED)
+                _updateUrl.value = result.settings.updateUrl
+                // Each refusal gets its own screen. They used to share FAILED,
+                // which told a user whose build was too old that the panel
+                // could not be reached — and offered them a Try-again button
+                // for a state that trying again cannot change.
+                show(
+                    when (result.decision) {
+                        is PanelGateRules.Decision.UpdateRequired -> SplashPhase.UPDATE_REQUIRED
+                        PanelGateRules.Decision.RootBlocked -> SplashPhase.ROOT_BLOCKED
+                        PanelGateRules.Decision.Allow -> SplashPhase.FAILED
+                    }
+                )
                 _outcome.value = SplashOutcome.Refused(result.decision)
             }
 
@@ -210,6 +233,7 @@ class SplashViewModel(app: Application) : AndroidViewModel(app) {
     /** Lets the failure screen try again without restarting the process. */
     fun retry() {
         _failureReason.value = ""
+        _updateUrl.value = ""
         _outcome.value = null
         start()
     }

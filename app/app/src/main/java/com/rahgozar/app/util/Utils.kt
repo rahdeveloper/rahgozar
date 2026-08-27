@@ -4,7 +4,6 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
-import android.os.Build
 import android.os.LocaleList
 import android.provider.Settings
 import android.util.Base64
@@ -460,15 +459,27 @@ object Utils {
     }
 
     /**
-     * Get the receiver flags based on the Android version.
+     * Flags for every one of this app's internal broadcast receivers.
      *
-     * @return The receiver flags.
+     * Always **not** exported. These receivers carry the tunnel's control
+     * channel: `MSG_STATE_STOP` closes it, `MSG_STATE_RESTART` cycles it, and
+     * the UI channel sets what the user is told about their own connection.
+     * Registering them EXPORTED — which is what this returned on API 33 and
+     * above — let any installed app with no permissions at all send
+     * `Intent(AppConfig.BROADCAST_ACTION_SERVICE).setPackage("com.rahgozar.app")`
+     * and turn a user's VPN off, or claim it was still on after doing so.
+     *
+     * Nothing breaks by closing it. The only sender is
+     * [com.rahgozar.app.helper.MessageHelper.sendMsg], which already pins
+     * `intent.package` to our own package, and same-uid delivery to a
+     * non-exported receiver is exactly what that was always meant to be.
+     * Setting the package limits who *receives*; it never limited who could
+     * *send*, which is the half that mattered.
+     *
+     * If a cross-uid sender is ever needed, it needs a `signature`-level
+     * permission declared on both ends — not an open receiver.
      */
-    fun receiverFlags(): Int = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-        ContextCompat.RECEIVER_EXPORTED
-    } else {
-        ContextCompat.RECEIVER_NOT_EXPORTED
-    }
+    fun receiverFlags(): Int = ContextCompat.RECEIVER_NOT_EXPORTED
 
     /**
      * Check if the package is Xray.

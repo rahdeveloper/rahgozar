@@ -4,7 +4,6 @@ import android.content.Context
 import com.rahgozar.app.AppConfig
 import com.rahgozar.app.util.LogUtil
 import java.io.File
-import java.util.concurrent.TimeUnit
 
 /**
  * Minimal root command runner backed by the `su` binary.
@@ -36,7 +35,7 @@ object RootShell {
                 .redirectErrorStream(true)
                 .start()
             val output = process.inputStream.bufferedReader().use { it.readText() }
-            val finished = process.waitFor(timeoutSeconds, TimeUnit.SECONDS)
+            val finished = process.waitForCompat(timeoutSeconds * 1_000)
             if (!finished) {
                 process.destroy()
                 LogUtil.e(AppConfig.TAG, "RootShell: timed out: $command")

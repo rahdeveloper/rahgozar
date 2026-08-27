@@ -1,4 +1,4 @@
-<resources>
+<resources xmlns:tools="http://schemas.android.com/tools">
     <color name="window_background_light">#FFFFFFFF</color>
     <color name="window_background_dark">#FF1C1B1F</color>
 
@@ -6,7 +6,10 @@
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowLightStatusBar">true</item>
-        <item name="android:windowLightNavigationBar">true</item>
+        <!-- API 27+. Older platforms ignore an unknown theme attribute, so this
+             is inert there rather than wrong; tools:targetApi says so to lint,
+             which was failing the release check over it. -->
+        <item name="android:windowLightNavigationBar" tools:targetApi="27">true</item>
         <item name="android:windowBackground">@color/window_background_light</item>
     </style>
 

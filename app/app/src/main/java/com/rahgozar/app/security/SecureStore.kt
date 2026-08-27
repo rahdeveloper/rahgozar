@@ -3,6 +3,7 @@ package com.rahgozar.app.security
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.os.Build
+import android.util.Base64
 import com.rahgozar.app.AppConfig
 import com.rahgozar.app.util.LogUtil
 import com.tencent.mmkv.MMKV
@@ -61,8 +62,25 @@ object SecureStore {
     private const val GCM_TAG_BITS = 128
     private const val GCM_NONCE_BYTES = 12
 
-    /** MMKV takes at most 16 bytes of key material. */
-    private const val CRYPT_KEY_BYTES = 16
+    /**
+     * MMKV takes at most 16 **bytes** of key material, and it takes them as a
+     * String whose UTF-8 encoding is what it actually uses.
+     *
+     * That cap is why this is not simply 16 random bytes: they would have to
+     * survive a round trip through String, and any byte above 0x7F becomes two
+     * UTF-8 bytes and blows the limit. So the key is 16 characters drawn from
+     * an alphabet that is one byte each.
+     *
+     * It used to be hex, truncated to 16 characters — which is 16 × 4 bits, so
+     * the store key an attacker had to guess was **64 bits**, not the 128 the
+     * generation code looked like it produced. Base64 of 12 random bytes is
+     * exactly 16 characters with no padding and carries the full 96 bits those
+     * bytes hold, which is the most this format allows.
+     */
+    private const val CRYPT_KEY_CHARS = 16
+
+    /** 12 bytes is what encodes to exactly [CRYPT_KEY_CHARS] base64 characters. */
+    private const val CRYPT_KEY_ENTROPY_BYTES = 12
 
     /**
      * The stores that hold something an attacker wants, and nothing that must
@@ -155,8 +173,13 @@ object SecureStore {
             resetStores(keyring)
         }
 
-        val fresh = ByteArray(CRYPT_KEY_BYTES).also { SecureRandom().nextBytes(it) }
-        val key = fresh.toHex()
+        // Only reached when there is no usable key yet: a first launch, or a
+        // Keystore entry that no longer unwraps. An install that already holds
+        // a key keeps it, including the older 64-bit one — re-keying a working
+        // store to gain entropy would risk the contents of every install in
+        // the field to fix installs that a reinstall fixes for free.
+        val fresh = ByteArray(CRYPT_KEY_ENTROPY_BYTES).also { SecureRandom().nextBytes(it) }
+        val key = fresh.toStoreKey()
         val wrapped = wrap(secret, key) ?: return null
         keyring.encode(KEY_WRAPPED, wrapped)
         return key
@@ -276,6 +299,16 @@ object SecureStore {
         keyring.removeValueForKey(KEY_WRAPPED)
     }
 
-    private fun ByteArray.toHex(): String =
-        joinToString("") { "%02x".format(it) }.take(CRYPT_KEY_BYTES)
+    /**
+     * The MMKV crypt key, as 16 single-byte characters carrying every bit of
+     * the input.
+     *
+     * NO_WRAP and NO_PADDING because MMKV counts bytes: a newline or a `=`
+     * would spend one of the sixteen on nothing. URL_SAFE only to keep the
+     * alphabet to characters that are unambiguous in a log or a bug report;
+     * the value never travels anywhere.
+     */
+    private fun ByteArray.toStoreKey(): String =
+        Base64.encodeToString(this, Base64.NO_WRAP or Base64.NO_PADDING or Base64.URL_SAFE)
+            .take(CRYPT_KEY_CHARS)
 }
