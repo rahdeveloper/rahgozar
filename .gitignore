@@ -27,6 +27,9 @@ captures/
 *.dex
 .cxx/
 app/app/.cxx/
+# Kotlin build sessions. Written during the build, so an uncommitted one is
+# exactly what release.ps1's clean-tree check refuses on the next release.
+.kotlin/
 
 # --- Prebuilt binaries -----------------------------------------------------
 # The AARs and .so files are build products, not source. GPL asks for the
