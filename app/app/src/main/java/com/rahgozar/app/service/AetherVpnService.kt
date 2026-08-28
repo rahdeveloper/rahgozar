@@ -10,6 +10,7 @@ import android.net.VpnService
 import android.os.ParcelFileDescriptor
 import androidx.core.content.ContextCompat
 import com.rahgozar.app.AppConfig
+import com.rahgozar.app.ads.SessionLimit
 import com.rahgozar.app.contracts.ServiceControl
 import com.rahgozar.app.core.CoreServiceManager
 import com.rahgozar.app.enums.EConfigType
@@ -179,6 +180,12 @@ class AetherVpnService : VpnService(), ServiceControl {
                     coreRunning = true
                     LogUtil.i(AppConfig.TAG, "$TAG: tunnel ready — data confirmed")
                     notifyUi(AppConfig.MSG_STATE_START_SUCCESS, "")
+                    // The countdown lives in whichever process holds the
+                    // tunnel, so every core has to arm it for itself. This one
+                    // did not, and a timed session on Aether ran past zero:
+                    // the screen showed 00:00 and the tunnel stayed up,
+                    // because nothing in this process was counting.
+                    SessionLimit.arm(this@AetherVpnService)
                 }
             }
 
@@ -244,6 +251,7 @@ class AetherVpnService : VpnService(), ServiceControl {
     }
 
     private fun stopEverything() {
+        SessionLimit.disarm()
         coreRunning = false
         // stop() unblocks run() and hands the engine the chance to close the tun
         // fd it now owns; we must not close it ourselves (double-close → fdsan).
@@ -262,6 +270,7 @@ class AetherVpnService : VpnService(), ServiceControl {
     private fun stopWithFailure(reason: String) {
         LogUtil.e(AppConfig.TAG, "$TAG: $reason")
         notifyUi(AppConfig.MSG_STATE_START_FAILURE, reason)
+        SessionLimit.disarm()
         coreRunning = false
         runCatching { NativeAetherBridge.setSocketProtector(null) }
         ownsSession = false
