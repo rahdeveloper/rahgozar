@@ -17,10 +17,12 @@
         android:name="android.hardware.touchscreen"
         android:required="false" />
 
-    <!-- https://developer.android.com/about/versions/11/privacy/package-visibility -->
-    <uses-permission
-        android:name="android.permission.QUERY_ALL_PACKAGES"
-        tools:ignore="PackageVisibilityPolicy,QueryAllPackagesPermission" />
+    <!--
+      No QUERY_ALL_PACKAGES. Google does not list per-app VPN (split tunnel)
+      among the permitted uses, so we take the visibility we actually need
+      through <queries> below instead. See <queries> for what each intent buys.
+      https://developer.android.com/about/versions/11/privacy/package-visibility
+    -->
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
@@ -59,6 +61,32 @@
     <uses-permission
         android:name="android.permission.ACCESS_ADSERVICES_TOPICS"
         tools:node="remove" />
+
+    <!--
+      Package visibility, taken deliberately instead of QUERY_ALL_PACKAGES.
+      Each intent below is the exact slice we need:
+        - MAIN/LAUNCHER  : the apps the user recognises, for the per-app
+                           routing (split tunnel) picker — the only reason we
+                           ever enumerated packages.
+        - VIEW/BROWSABLE : browsers, so an ad click can be pulled into the
+                           tunnel with the ad it belongs to (PerAppProxy).
+        - CustomTabsService : the Custom Tabs providers the ad SDK usually
+                           opens links through, same reason.
+    -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <category android:name="android.intent.category.BROWSABLE" />
+            <data android:scheme="https" />
+        </intent>
+        <intent>
+            <action android:name="android.support.customtabs.action.CustomTabsService" />
+        </intent>
+    </queries>
 
     <!--
       allowBackup is off deliberately. The app holds a device private key and a
