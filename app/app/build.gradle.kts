@@ -88,8 +88,8 @@ android {
         applicationId = "com.rahgozar.app"
         minSdk = 24
         targetSdk = 37
-        versionCode = 745
-        versionName = "2.4.2"
+        versionCode = 746
+        versionName = "2.4.3"
 
         // English only, and enforced at build time rather than left to the
         // resource folders being empty. Libraries bring their own translations

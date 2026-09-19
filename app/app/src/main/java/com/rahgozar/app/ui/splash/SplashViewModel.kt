@@ -106,10 +106,18 @@ class SplashViewModel(app: Application) : AndroidViewModel(app) {
             // The sync starts immediately and runs alongside the presentation:
             // the screen never delays the work, it only refuses to race ahead
             // of what the user can read.
+            // No stage callback. What the screen says after a failed sync is
+            // decided once, in finish(), when the reason is known. Showing
+            // FAILED here the moment the sync reported it put "Could not reach
+            // the panel" and a Try-again button up for a full MESSAGE_MS with no
+            // reason underneath — for every failure, including a refusal from a
+            // panel that had plainly been reached, and including the soft
+            // failures that then go on into the app on the saved servers. That
+            // reason-less screen is exactly what Play's reviewer photographed
+            // when a Google-signed build was refused for not yet being on the
+            // signature allowlist.
             val sync: Deferred<PanelSync.Result> = async {
-                PanelSync.run(getApplication()) { stage ->
-                    if (stage == PanelSync.Stage.FAILED) show(SplashPhase.FAILED)
-                }
+                PanelSync.run(getApplication())
             }
 
             // 5b — the mark. Nothing true to say yet, so this is the one beat
@@ -177,7 +185,14 @@ class SplashViewModel(app: Application) : AndroidViewModel(app) {
 
             is PanelSync.Result.Unavailable -> {
                 _failureReason.value = result.reason
-                if (result.fatal) {
+                // A soft failure means "carry on with what you have" only when
+                // there is something to carry on with. On a first launch there
+                // is not, and treating it as soft opened the app on an empty
+                // server list under the words "Using the saved servers" — two
+                // untrue things at once, and to a Play reviewer an app that
+                // does not work. With nothing stored, it is a hard stop with
+                // the reason on screen and a way to try again.
+                if (result.fatal || PanelSync.storedConfiguration() == null) {
                     show(SplashPhase.FAILED)
                     _outcome.value = SplashOutcome.Unreachable
                 } else {

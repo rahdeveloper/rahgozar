@@ -566,8 +566,15 @@ private fun messageFor(
             subtitle = "Could not reach the panel",
         )
 
+        // Not "could not reach the panel". Every way into this phase is a hard
+        // stop — a build that is not on the allowlist, a blocked device, a
+        // discovery file that is missing or unusable, or a first launch that
+        // reached nothing at all — and in the first two the panel was reached
+        // and answered. The old headline sent Play's reviewer, and every user
+        // after them, to check a connection that was fine. This line is true in
+        // all of them; the reason underneath says which.
         SplashPhase.FAILED -> SplashMessage(
-            headline = "Could not reach the panel",
+            headline = "Could not load servers",
             // The reason is a diagnostic, always in English: it comes from the
             // network layer and is what a support conversation quotes.
             subtitle = failureReason,

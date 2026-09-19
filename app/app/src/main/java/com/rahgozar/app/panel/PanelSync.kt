@@ -176,7 +176,17 @@ object PanelSync {
             },
         )
 
-        if (outcome is Result.Unavailable) onStage(Stage.FAILED)
+        if (outcome is Result.Unavailable) {
+            // The verdict for the whole search, at a level a release build keeps.
+            // The refusals (unregistered build, blocked device) return without
+            // logging anything of their own, so without this line a device the
+            // panel turned away looked, in its log, like one that never tried.
+            LogUtil.w(
+                TAG,
+                "panel: sync failed — ${outcome.reason} (fatal=${outcome.fatal}, answered=${outcome.answered})",
+            )
+            onStage(Stage.FAILED)
+        }
         outcome
     }
 
@@ -451,7 +461,12 @@ object PanelSync {
             PanelStore.clearRegistration()
             Result.Unavailable("registration expired", answered = true)
         } catch (e: Exception) {
-            LogUtil.i(TAG, "panel: $url failed — ${e.message}")
+            // WARN, not INFO: release builds start at "warning" until the
+            // panel says otherwise, and a first launch that never reaches the
+            // panel never hears otherwise. At INFO this — the one line that
+            // says why a sync failed — was absent from exactly the logs that
+            // needed it, Play's pre-launch devices included.
+            LogUtil.w(TAG, "panel: $url failed — ${e.message}")
             Result.Unavailable(e.message ?: "sync failed")
         }
     }
