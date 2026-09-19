@@ -10,6 +10,7 @@ import com.rahgozar.app.dto.entities.ProfileItem
 import com.rahgozar.app.handler.MmkvManager
 import com.rahgozar.app.root.RootManager
 import com.rahgozar.app.service.TunnelState
+import com.rahgozar.app.util.JsonUtil
 import com.rahgozar.app.util.LogUtil
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -589,6 +590,7 @@ object PanelSync {
         // so plainly.
         val selected = MmkvManager.getSelectServer()
         if (!selected.isNullOrEmpty() && selected !in kept) {
+            LogUtil.w(TAG, "panel: the selection $selected is not among the servers sent, clearing it")
             MmkvManager.setSelectServer("")
         }
         PanelStore.serverCountries = Gson().toJson(countries)
@@ -629,7 +631,15 @@ object PanelSync {
 
         val guids = profiles.indices.map { AppConfig.SMART_PROFILE_PREFIX + it }
         profiles.forEachIndexed { index, profile ->
-            MmkvManager.encodeServerConfig(guids[index], profile)
+            // The profile only, never the list. `encodeServerConfig` also adds
+            // the guid to the *visible* server list — which is exactly where
+            // these had been going, one row per candidate: a server the user
+            // could pick and the auto-pick could choose, showing a panel
+            // tunnel as if it were theirs. And the next sync then removed that
+            // row as a server the panel had not sent, taking the selection
+            // with it if it pointed there. What this function's own comment
+            // says about hidden profiles is true again.
+            MmkvManager.encodeProfileDirect(guids[index], JsonUtil.toJson(profile))
         }
         // A shrinking list must retire its tail, and the one-profile guid of
         // older builds goes with it.

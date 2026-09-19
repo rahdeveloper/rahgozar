@@ -618,7 +618,17 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
             // raced: [PanelSync.refreshIfDue] refuses while a tunnel is
             // running, and by then one will be.
             delay(SYNC_SETTLE_MS)
-            runCatching { PanelSync.refreshIfDue(getApplication()) }
+            val synced = runCatching { PanelSync.refreshIfDue(getApplication()) }.getOrNull()
+            // This screen was drawn before the sync, and a sync replaces the
+            // list — the selected server with it, if the operator retired it.
+            // Nothing else re-reads after this one: the splash's sync has
+            // onResume behind it, this one had nobody, and the home screen went
+            // on naming a server the connect tap could no longer find. So it
+            // re-reads, and an empty selection is filled the way onResume
+            // fills it, by measuring rather than guessing.
+            if (synced != null) _serversRevision.value = _serversRevision.value + 1
+            refreshServer()
+            autoPickIfNeeded()
         }
     }
 

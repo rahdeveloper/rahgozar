@@ -7,6 +7,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.snapshotFlow
 import com.tencent.mmkv.MMKV
+import com.rahgozar.app.AppConfig
 import com.rahgozar.app.AppConfig.DEFAULT_SUBSCRIPTION_ID
 import com.rahgozar.app.AppConfig.PREF_IS_BOOTED
 import com.rahgozar.app.AppConfig.PREF_ROUTING_RULESET
@@ -20,6 +21,7 @@ import com.rahgozar.app.dto.entities.SubscriptionItem
 import com.rahgozar.app.dto.entities.WebDavConfig
 import com.rahgozar.app.security.SecureStore
 import com.rahgozar.app.util.JsonUtil
+import com.rahgozar.app.util.LogUtil
 import com.rahgozar.app.util.Utils
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -86,6 +88,24 @@ object MmkvManager {
      */
     fun setSelectServer(guid: String) {
         mainStorage.encode(KEY_SELECTED_SERVER, guid)
+    }
+
+    /**
+     * Forgets the selection, because the server it names is being removed.
+     *
+     * Loud on purpose, and with the caller's stack. On 2.4.3 a selection
+     * vanished from under a user whose screen still named the server, and the
+     * connect tap was refused with "add a server first" — and nothing in a
+     * release log could say which removal did it. The removals all come
+     * through here, so the next one will say.
+     */
+    private fun dropSelection(guid: String) {
+        LogUtil.w(
+            AppConfig.TAG,
+            "selection: $guid is being removed, so nothing is selected now",
+            Throwable("selection dropped"),
+        )
+        mainStorage.remove(KEY_SELECTED_SERVER)
     }
 
     /**
@@ -250,7 +270,7 @@ object MmkvManager {
 
         // Clean up storage
         if (getSelectServer() == guid) {
-            mainStorage.remove(KEY_SELECTED_SERVER)
+            dropSelection(guid)
         }
         profileFullStorage.remove(guid)
         serverAffStorage.remove(guid)
@@ -268,7 +288,7 @@ object MmkvManager {
         // Remove all servers in the list
         serverList.forEach { guid ->
             if (getSelectServer() == guid) {
-                mainStorage.remove(KEY_SELECTED_SERVER)
+                dropSelection(guid)
             }
             profileFullStorage.remove(guid)
             serverAffStorage.remove(guid)
@@ -295,7 +315,7 @@ object MmkvManager {
         val selectedServer = getSelectServer()
         guids.forEach { guid ->
             if (selectedServer == guid) {
-                mainStorage.remove(KEY_SELECTED_SERVER)
+                dropSelection(guid)
             }
             profileFullStorage.remove(guid)
             serverAffStorage.remove(guid)

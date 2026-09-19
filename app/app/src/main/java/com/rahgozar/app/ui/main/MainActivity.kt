@@ -127,7 +127,7 @@ class MainActivity : HelperBaseComponentActivity() {
 
     private val requestVpnPermission =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-            if (it.resultCode == RESULT_OK) startV2Ray()
+            if (it.resultCode == RESULT_OK) dial(withAd = false)
         }
 
     private val settingsActivityLauncher =
@@ -433,7 +433,18 @@ class MainActivity : HelperBaseComponentActivity() {
             return
         }
 
+        // Re-read, not trusted. The screen's idea of the selection is only as
+        // fresh as its last refresh, and the selection can go between two of
+        // them. On 2.4.3 it did: the screen went on naming the server, this
+        // check believed it, and the tap reached the service, which found
+        // nothing selected and answered with upstream's "add a server first"
+        // toast — to a user looking at the server by name.
+        val shown = homeViewModel.uiState.value.serverName
+        homeViewModel.refreshServer()
         if (!homeViewModel.uiState.value.hasServer) {
+            if (shown.isNotEmpty()) {
+                LogUtil.w(AppConfig.TAG, "connect: the screen named \"$shown\" but nothing is selected any more")
+            }
             // Nothing to connect to — but the tap is still the user's first
             // action, so it ends the splash's ad session like any other. That
             // matters more than it sounds: the session only ends on an action,
@@ -452,22 +463,38 @@ class MainActivity : HelperBaseComponentActivity() {
         }
 
         // The consent sheet is its own modal moment, and it happens once per
-        // install. Nothing is stacked on top of it: its callback runs a plain
-        // connect, and the ad scenario gets its turn on the next tap.
+        // install. Nothing is stacked on top of it: its callback runs the
+        // journey without the ad, and the ad scenario gets its turn on the
+        // next tap.
         val consent = if (SettingsManager.isVpnMode()) VpnService.prepare(this) else null
         if (consent != null) {
             requestVpnPermission.launch(consent)
             return
         }
 
+        dial(withAd = true)
+    }
+
+    /**
+     * The connect journey itself: the ad this tap owes, when it owes one, and
+     * then the tunnel on [ConnectingScreen] until it has an answer.
+     *
+     * @param withAd false only for the connect behind the VPN consent sheet.
+     *   Nothing is stacked on that sheet, so it goes without the ad, but the
+     *   rest is the same journey. It used to be a bare [startV2Ray], so the
+     *   first connect of every install — the one that asks for consent — was
+     *   the one that never showed [ConnectingScreen].
+     */
+    private fun dial(withAd: Boolean) {
+        if (connecting.value) return
         connecting.value = true
         // Asked before the flow runs, because the flow is what changes the
         // answer. Not a promise that an ad will fill — only that this wait is
         // one an ad is expected in, which is what the line on screen claims.
-        adInThisWait.value = AdManager.isActive(AdSlot.CONNECT)
+        adInThisWait.value = withAd && AdManager.isActive(AdSlot.CONNECT)
         lifecycleScope.launch {
             try {
-                val usedSmart = runAdBeforeConnect {
+                val usedSmart = withAd && runAdBeforeConnect {
                     connectStage.value = ConnectStage.PREPARING
                 }
                 // The paths that showed nothing at all still land on the
@@ -482,7 +509,13 @@ class MainActivity : HelperBaseComponentActivity() {
                     delay(SMART_RELEASE_MS)
                 }
                 connectStage.value = ConnectStage.DIALLING
-                startV2Ray()
+                if (!startV2Ray()) {
+                    // Nothing was started, and [startV2Ray] has already said
+                    // why. Left up, this screen would go on to report a
+                    // connect that never began as a failed one.
+                    connectStage.value = null
+                    return@launch
+                }
                 awaitConnectSettled()
 
                 if (homeViewModel.uiState.value.isOn) {
@@ -653,10 +686,20 @@ class MainActivity : HelperBaseComponentActivity() {
         )
     }
 
-    private fun startV2Ray() {
+    /**
+     * Starts the user's tunnel on the selected server.
+     *
+     * @return false when there was nothing to start, which the user has
+     *   already been told about.
+     */
+    private fun startV2Ray(): Boolean {
+        // Read again here as well as in [beginConnect]: an ad or a consent
+        // sheet can stand between that check and this one.
+        homeViewModel.refreshServer()
         if (!homeViewModel.uiState.value.hasServer) {
+            homeViewModel.autoPickIfNeeded()
             warnNoServer()
-            return
+            return false
         }
         // Whatever happened before this tap, the server about to start is the
         // user's. A leftover run-guid override — from an ad flow that was
@@ -675,6 +718,7 @@ class MainActivity : HelperBaseComponentActivity() {
             checkAndRequestPermission(PermissionType.ACCESS_LOCAL_NETWORK) {}
         }
         LauncherManager.startService(this)
+        return true
     }
 
     private fun restartV2Ray() {
