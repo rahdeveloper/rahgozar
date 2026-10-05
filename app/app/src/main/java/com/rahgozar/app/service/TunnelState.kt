@@ -17,10 +17,17 @@ import android.content.Context
  */
 object TunnelState {
 
+    /**
+     * Every service that can carry a user's connection. A core missing here is
+     * a tunnel the app cannot see: Aether was, and with it up the splash
+     * replayed and its ad flow replaced Aether's tunnel and then stopped it,
+     * and the widget, which asks this, could never stop it at all.
+     */
     private val TUNNEL_SERVICES = setOf(
         CoreVpnService::class.java.name,
         OpenVpnService::class.java.name,
         SingBoxService::class.java.name,
+        AetherVpnService::class.java.name,
         CoreProxyOnlyService::class.java.name,
         CoreRootService::class.java.name,
     )

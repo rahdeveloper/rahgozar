@@ -160,6 +160,13 @@ class SingBoxService : VpnService(), ServiceControl, SingBoxTunnel {
             return START_NOT_STICKY
         }
         ownsSession = true
+        // A new session may land on the old service object: Android keeps it
+        // alive while the system is still bound to its interface, and delivers
+        // the next start to it. The stop latch is per session, not per object —
+        // left set, this session got no traffic counters and its stop returned
+        // at once, a tunnel nothing could bring down. Safe to clear here: the
+        // session latch above is only released once the old stop has finished.
+        isStopping.set(false)
 
         if (!SingBoxNative.ensureLoaded()) {
             stopWithFailure("the sing-box core is not available on this device")

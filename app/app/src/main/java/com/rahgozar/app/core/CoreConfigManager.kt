@@ -163,6 +163,19 @@ object CoreConfigManager {
             )
         }
 
+        // The primary outbound is the one unmatched traffic takes. If it could
+        // not be built — a profile Xray cannot run, such as a sing-box, OpenVPN
+        // or Aether server reaching this core through Always-on VPN or a sticky
+        // restart — the template's `direct` is left first, becomes the default,
+        // and the phone's traffic leaves unprotected under a tunnel that reports
+        // itself connected. Refused instead, so the start fails visibly.
+        check(
+            primaryResolvedOutbound.resolvedType != CoreResolvedType.NORMAL ||
+                primaryResolvedOutbound.tag in existingTags
+        ) {
+            "the selected server (${primaryResolvedOutbound.profile.configType}) cannot run on the Xray core"
+        }
+
         // User routing rules (policyGroupBalancerTags rewrites TAG_PROXY→balancer when main is POLICYGROUP).
         configureRouting(configContext, v2rayConfig, policyGroupBalancerTags)
         configureFakeDns(v2rayConfig)

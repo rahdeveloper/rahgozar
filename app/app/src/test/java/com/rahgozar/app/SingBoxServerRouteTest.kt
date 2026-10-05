@@ -151,11 +151,16 @@ class VerificationTrafficRuleTest {
     }
 
     @Test
-    fun the_previous_session_s_bytes_do_not_count() {
-        // The counters belong to the service and the UI's copy is whatever the
-        // last session left behind, so the baseline is what makes this honest —
-        // without it every reconnect would look like it was already carrying.
-        assertFalse(keepsTheConnection(baseline = 5_000_000, down = 5_000_000, up = 0))
-        assertTrue(keepsTheConnection(baseline = 5_000_000, down = 5_100_000, up = 0))
+    fun a_new_session_counts_from_zero() {
+        // This used to model counters that carry on across sessions, with the
+        // previous session's total as the baseline. They do not: every core
+        // counts from zero for each session. With fresh counters, the old
+        // total as a baseline turned real traffic into a negative number —
+        // which is what tore down every second AnyConnect connection.
+        assertTrue(keepsTheConnection(baseline = 0, down = 100_000, up = 0))
+        assertFalse(
+            "a previous session's total is no baseline for fresh counters",
+            keepsTheConnection(baseline = 5_000_000, down = 100_000, up = 0),
+        )
     }
 }

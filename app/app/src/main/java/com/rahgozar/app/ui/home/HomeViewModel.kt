@@ -243,11 +243,18 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
 
         setLink(LinkState.CONNECTING)
         verifyGuid = guid
-        // Taken now rather than assumed to be zero: the counters belong to the
-        // service and the UI's copy of them is whatever the last session left
-        // behind until the first update of this one arrives.
-        verifyBaselineBytes = _uiState.value.let { it.sessionDownBytes + it.sessionUpBytes }
-        verifyBaselineDownBytes = _uiState.value.sessionDownBytes
+        // Zero, not the screen's copy. Every core counts from zero for each
+        // session — Xray's notification resets on start, libbox builds a new
+        // traffic manager per box, OpenVPN keeps its counters per session — so
+        // what the screen still holds is the *previous* session's total. Taken
+        // as the baseline, it left "bytes since the check began" negative for
+        // the whole check: from the second connection of a run, every
+        // AnyConnect server was torn down as "not responding", and the
+        // "traffic is moving" fallback never fired for any core. The screen's
+        // copy is cleared with it, so it cannot be mistaken for this session's.
+        verifyBaselineBytes = 0
+        verifyBaselineDownBytes = 0
+        _uiState.update { it.copy(sessionUpBytes = 0, sessionDownBytes = 0) }
 
         // The test service, not the running core's own delay call.
         //

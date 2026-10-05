@@ -191,6 +191,12 @@ class OpenVpnService : VpnService(), ServiceControl {
             return START_NOT_STICKY
         }
         ownsSession = true
+        // Per session, not per object: see stopVpn. Android keeps the old
+        // service object alive while the system is still bound to its
+        // interface and delivers the next start to it, so this session may be
+        // running on an object whose previous session already stopped. Safe
+        // here — the session latch above is released only once that stop ended.
+        isStopping.set(false)
 
         if (!ensureNativeLoaded()) {
             stopWithFailure("the OpenVPN core is not available on this device")
@@ -434,10 +440,14 @@ class OpenVpnService : VpnService(), ServiceControl {
      * Brings the tunnel down. Safe to call more than once, and safe to call
      * from the worker thread itself.
      *
-     * The latch is never released: once a session is stopping it is over, and
-     * a fresh session arrives as a new service instance with a fresh flag.
-     * Releasing it would let a late onDestroy send a second "stopped" to the
-     * UI after the screen had already moved on.
+     * The latch is released only when a new session claims this object (see
+     * onStartCommand), never on the way down: releasing it here would let a
+     * late onDestroy send a second "stopped" to the UI after the screen had
+     * moved on. It used to be never released, on the belief that a fresh
+     * session always arrives as a new service instance — but Android keeps the
+     * old object alive while the system is bound to its interface and hands it
+     * the next start, which then ran with this latch already set: its stop
+     * returned at once and the tunnel could not be brought down.
      */
     private fun stopVpn() {
         if (!isStopping.compareAndSet(false, true)) return

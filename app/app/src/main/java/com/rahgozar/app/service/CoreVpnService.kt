@@ -20,6 +20,8 @@ import com.rahgozar.app.contracts.ServiceControl
 import com.rahgozar.app.contracts.Tun2SocksControl
 import com.rahgozar.app.core.CoreRoutePin
 import com.rahgozar.app.core.CoreServiceManager
+import com.rahgozar.app.core.LauncherManager
+import com.rahgozar.app.enums.EConfigType
 import com.rahgozar.app.handler.MmkvManager
 import com.rahgozar.app.handler.NotificationManager
 import com.rahgozar.app.handler.SettingsManager
@@ -34,6 +36,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 
 /** Log prefix for the ad flow's tunnel, distinct from the user's own. */
 private const val TAG_SMART = "StartCore-Smart"
+
+/** Server types another core carries; see the system-start check in onStartCommand. */
+private val NON_XRAY_TYPES = setOf(EConfigType.SINGBOX, EConfigType.OPENVPN, EConfigType.AETHER)
 
 @SuppressLint("VpnServicePolicy")
 class CoreVpnService : VpnService(), ServiceControl {
@@ -94,6 +99,19 @@ class CoreVpnService : VpnService(), ServiceControl {
         val isSystemVpnStart = intent == null || intent.action == SERVICE_INTERFACE
         if (isSystemVpnStart) {
             unlockStart()
+            // The system starts this service whatever is selected — Always-on
+            // VPN, a sticky restart — and LauncherManager, which picks the core
+            // for a server, is never asked. Run as Xray, a sing-box, OpenVPN or
+            // Aether profile built no proxy outbound and `direct` carried every
+            // connection under a tunnel that said it was connected. Handed to
+            // the core that runs it instead.
+            val runType = MmkvManager.getRunServer()?.let { MmkvManager.decodeServerConfig(it)?.configType }
+            if (runType in NON_XRAY_TYPES) {
+                LogUtil.w(AppConfig.TAG, "StartCore-VPN: system start for a $runType server; handing it to its own core")
+                LauncherManager.startService(applicationContext)
+                stopSelf()
+                return START_NOT_STICKY
+            }
         }
         if (!tryLockStart()) {
             LogUtil.w(AppConfig.TAG, "StartCore-VPN: Start already in progress")
