@@ -139,6 +139,37 @@ class SingBoxTunnelConfigTest {
         assertEquals("direct", config.route().get("final").asString)
     }
 
+    @Test
+    fun `a desktop client's local listener becomes the app's tunnel`() {
+        // A configuration copied from a desktop client brings that client's own
+        // inbound — a proxy listening on localhost, which is how a desktop is
+        // pointed at it. Run as written, the core opens that listener and no VPN
+        // at all, and the app reports connected over a phone whose traffic never
+        // reaches the server. Seen on 2.4.4 with exactly this shape.
+        val source = """
+            {
+              "inbounds": [{"type":"mixed","tag":"mixed-in","listen":"127.0.0.1","listen_port":10808}],
+              "outbounds": [{
+                "type":"vless","tag":"proxy","server":"203.0.113.7","server_port":443,
+                "uuid":"00000000-0000-0000-0000-000000000000",
+                "tls":{"enabled":true,"server_name":"example.ir","insecure":true},
+                "transport":{"type":"ws","path":"/ws/","headers":{"Host":"cdn.example.net"}}
+              }]
+            }
+        """.trimIndent()
+
+        val config = tunnel(source)
+
+        val inbounds = config.getAsJsonArray("inbounds").map { it.asJsonObject.get("type").asString }
+        assertEquals("the tunnel, and nothing listening on localhost", listOf("tun"), inbounds)
+        assertEquals("proxy", config.route().get("final").asString)
+        assertEquals(
+            "lookups still go through the proxy",
+            "proxy",
+            config.dns().getAsJsonArray("servers")[0].asJsonObject.get("detour").asString,
+        )
+    }
+
     private companion object {
         const val BARE = """
             {

@@ -9,6 +9,7 @@ import com.rahgozar.app.BuildConfig
 import com.rahgozar.app.core.CoreRoutePin
 import com.rahgozar.app.handler.MmkvManager
 import com.rahgozar.app.handler.SettingsManager
+import com.rahgozar.app.util.LogUtil
 import com.rahgozar.app.util.Utils
 
 /**
@@ -128,9 +129,10 @@ object SingBoxConfig {
     /**
      * The configuration the tunnel runs.
      *
-     * A blob that was already a full configuration is left alone — the
-     * operator wrote it, and second-guessing it would make their tun settings
-     * unpredictable. Only a wrapped outbound gets the tunnel built around it.
+     * A blob that brings its own tun is left alone — the operator wrote it, and
+     * second-guessing it would make their tun settings unpredictable. Anything
+     * else gets the tunnel built around it, including a full configuration
+     * whose only inbounds are a desktop client's local listeners: see below.
      */
     fun forTunnel(blob: String, settings: TunnelSettings = tunnelSettings()): String {
         val config = normalize(blob)
@@ -150,7 +152,21 @@ object SingBoxConfig {
             )
         }
 
-        if (config.has("inbounds")) return config.toString()
+        config.getAsJsonArray("inbounds")?.let { inbounds ->
+            val types = inbounds.mapNotNull { (it as? JsonObject)?.string("type") }
+            if ("tun" in types) return config.toString()
+            // Inbounds but no tun: a configuration copied from a desktop client,
+            // whose `mixed`/`socks`/`http` listener on localhost is how that
+            // client is used. Run as written, the core opens that listener and
+            // no VPN at all — and the app, whose core did start, says
+            // "connected" over a phone whose traffic never reaches the server.
+            // Seen on 2.4.4 with a server added to the panel as such a config:
+            // connected, no key icon, no tun. The listeners are dropped rather
+            // than kept beside the tun, because a proxy on 127.0.0.1 is open
+            // to every other app on the phone.
+            LogUtil.w(AppConfig.TAG, "sing-box: the server's configuration had $types inbounds and no tun; building the tunnel instead")
+            config.remove("inbounds")
+        }
 
         val outbounds = config.getAsJsonArray("outbounds") ?: JsonArray()
         val endpoints = config.getAsJsonArray("endpoints")
