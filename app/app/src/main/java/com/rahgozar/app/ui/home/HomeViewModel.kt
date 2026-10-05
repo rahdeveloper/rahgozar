@@ -755,7 +755,8 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
      * quickest responder and the theoretical best is not worth that.
      *
      * Does nothing when a server is already selected: the user's own choice
-     * outranks any measurement.
+     * outranks any measurement. That holds for the whole round, not only its
+     * start — see [yieldToUserChoice] and the checks at the round's two ends.
      */
     fun autoPickIfNeeded() {
         if (autoPicking) return
@@ -765,8 +766,7 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         // sessions put us inside it — and the choice would be made on those
         // numbers. The caller re-runs this when the session ends.
         if (SmartTunnel.isActive || insideATunnel()) return
-        val selected = MmkvManager.getSelectServer()
-        if (!selected.isNullOrEmpty() && MmkvManager.decodeServerConfig(selected) != null) return
+        if (hasUsableSelection()) return
 
         val guids = MmkvManager.decodeAllServerList().toList()
         if (guids.isEmpty()) return
@@ -789,6 +789,27 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
      */
     private fun insideATunnel(): Boolean = SessionLimit.ridesUserTunnel && _uiState.value.isOn
 
+    /** A selection that names a server this device can still start. */
+    private fun hasUsableSelection(): Boolean {
+        val selected = MmkvManager.getSelectServer()
+        return !selected.isNullOrEmpty() && MmkvManager.decodeServerConfig(selected) != null
+    }
+
+    /**
+     * The user chose a server by hand. A round still measuring finishes its
+     * measurements — they fill in the list — but no longer chooses.
+     *
+     * The rule was always that a choice outranks a measurement, but it was only
+     * checked when a round *started* — and a round starts on an empty
+     * selection, which is every first launch. So a server tapped while the
+     * round was still measuring (several seconds with sing-box servers in the
+     * list) was replaced when it finished, by whatever had measured fastest.
+     * Reported on 2.4.4 as a server that "cannot be selected".
+     */
+    fun yieldToUserChoice() {
+        autoPicking = false
+    }
+
     /** One server reported in. Takes it if it answered and the list is long. */
     private fun onMeasured(guid: String) {
         if (!autoPicking || guid.isEmpty()) return
@@ -802,8 +823,11 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
 
         val total = MmkvManager.decodeAllServerList().size
         if (total > FAST_PICK_ABOVE) {
-            select(guid)
             autoPicking = false
+            // Something chose while this round was measuring. It stands, and
+            // the round measures on for the list without choosing.
+            if (hasUsableSelection()) return
+            select(guid)
             cancelTesting()
         }
     }
@@ -812,6 +836,9 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
     private fun finishAutoPick() {
         if (!autoPicking) return
         autoPicking = false
+        // Something chose while this round was measuring — the user, through a
+        // path that did not go by [yieldToUserChoice], or a sync. It stands.
+        if (hasUsableSelection()) return
 
         val best = MmkvManager.decodeAllServerList()
             .mapNotNull { guid ->

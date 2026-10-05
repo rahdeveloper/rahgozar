@@ -108,6 +108,60 @@ class ConnectSelectionWiringTest {
         )
     }
 
+    // ---------------------------------------------- a choice made by hand --
+    //
+    // Reported on 2.4.4: a server "could not be selected" — tapped, the list
+    // closed, the home screen still named another one, and every later tap on
+    // that row did nothing. Two causes, each harmless alone. An auto-pick round
+    // that started on an empty selection (every first launch) replaced a tap
+    // made while it was measuring; and the tap was compared with MainViewModel's
+    // copy of the selection, which the auto-pick never updates — so once that
+    // copy had gone stale on the tapped server, the tap was "already selected".
+
+    @Test
+    fun `a tap on a server stops a running auto-pick before it selects`() {
+        val onSelect = mainActivity().between("onSelect = { row ->", "showServers = false")
+        val yields = onSelect.indexOf("homeViewModel.yieldToUserChoice()")
+        val selects = onSelect.indexOf("setSelectServer(row.guid)")
+        assertTrue("The server list's tap no longer stops the auto-pick:\n$onSelect", yields >= 0)
+        assertTrue(
+            "The auto-pick is stopped after the selection is written, which leaves a window " +
+                "for a round finishing in between to replace it:\n$onSelect",
+            yields < selects,
+        )
+    }
+
+    @Test
+    fun `a tap is compared with the stored selection, not a cached copy`() {
+        val setSelect = mainActivity().between("private fun setSelectServer(guid: String)", "private fun drawerItems")
+        assertTrue(
+            "setSelectServer must decide 'already selected' from what is stored:\n$setSelect",
+            setSelect.contains("MmkvManager.getSelectServer()"),
+        )
+        assertTrue(
+            "setSelectServer compares with MainViewModel's copy again — the auto-pick and the " +
+                "sync never update it, and a stale copy turns taps into no-ops:\n$setSelect",
+            !setSelect.contains("mainViewModel.uiState.value.selectedGuid"),
+        )
+    }
+
+    @Test
+    fun `the auto-pick never replaces a usable selection it did not make`() {
+        val home = source("ui/home/HomeViewModel.kt").readText()
+        for ((name, end, pick) in listOf(
+            Triple("private fun finishAutoPick()", "private fun select(", "select(best)"),
+            Triple("private fun onMeasured(", "private fun finishAutoPick()", "select(guid)"),
+        )) {
+            val body = home.between(name, end)
+            val check = body.indexOf("hasUsableSelection()")
+            assertTrue("$name no longer checks for a choice made during the round:\n$body", check >= 0)
+            assertTrue(
+                "$name checks after it has already chosen:\n$body",
+                check < body.indexOf(pick),
+            )
+        }
+    }
+
     // ------------------------------------------------------------ reading --
 
     private fun mainActivity() = source("ui/main/MainActivity.kt").readText()

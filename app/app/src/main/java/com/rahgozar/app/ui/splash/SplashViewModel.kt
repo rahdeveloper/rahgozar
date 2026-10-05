@@ -117,7 +117,7 @@ class SplashViewModel(app: Application) : AndroidViewModel(app) {
             // when a Google-signed build was refused for not yet being on the
             // signature allowlist.
             val sync: Deferred<PanelSync.Result> = async {
-                PanelSync.run(getApplication())
+                syncAllowingOneRetry()
             }
 
             // 5b — the mark. Nothing true to say yet, so this is the one beat
@@ -144,6 +144,24 @@ class SplashViewModel(app: Application) : AndroidViewModel(app) {
             assets.await()
             finish(settled)
         }
+    }
+
+    /**
+     * The sync, and on a first launch one more try before the error screen.
+     *
+     * The screen needs nothing new for it: a sync that is taking a while is
+     * already shown as «لطفاً صبر کنید», which stays true for the second try.
+     * See [FirstLaunchRetry] for when, and why.
+     */
+    private suspend fun syncAllowingOneRetry(): PanelSync.Result {
+        val first = PanelSync.run(getApplication())
+        if (!FirstLaunchRetry.worthIt(first, PanelSync.storedConfiguration() != null)) return first
+        LogUtil.w(
+            AppConfig.TAG,
+            "splash: first sync failed (${(first as PanelSync.Result.Unavailable).reason}); trying once more",
+        )
+        delay(FirstLaunchRetry.DELAY_MS)
+        return PanelSync.run(getApplication())
     }
 
     /** Awaits the sync, giving up after [timeoutMs] so the screen can move on. */

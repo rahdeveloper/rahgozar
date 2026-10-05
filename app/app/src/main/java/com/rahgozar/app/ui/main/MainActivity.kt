@@ -208,6 +208,9 @@ class MainActivity : HelperBaseComponentActivity() {
                     rows = remember(revision, state.testing, testingGuids) { homeViewModel.serverRows() },
                     testing = state.testing,
                     onSelect = { row ->
+                        // First, so an auto-pick round still measuring cannot
+                        // finish by replacing this choice.
+                        homeViewModel.yieldToUserChoice()
                         setSelectServer(row.guid)
                         homeViewModel.refreshServer()
                         showServers = false
@@ -730,11 +733,17 @@ class MainActivity : HelperBaseComponentActivity() {
     }
 
     private fun setSelectServer(guid: String) {
-        val selected = mainViewModel.uiState.value.selectedGuid
-        if (guid != selected) {
-            mainViewModel.updateSelectedGuid(guid)
-            if (mainViewModel.uiState.value.isRunning) restartV2Ray()
+        // Compared with what is stored, not with MainViewModel's copy of it.
+        // The auto-pick and the panel sync both change the selection without
+        // telling MainViewModel, and once its copy went stale on a server the
+        // user wanted, every tap on that row was taken for "already selected"
+        // and did nothing at all.
+        if (guid == MmkvManager.getSelectServer()) {
+            mainViewModel.refreshSelectedGuid()
+            return
         }
+        mainViewModel.updateSelectedGuid(guid)
+        if (mainViewModel.uiState.value.isRunning) restartV2Ray()
     }
 
     /** The drawer entries that survive the security pass, plus the panel's links. */
