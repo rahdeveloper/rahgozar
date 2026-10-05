@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.rahgozar.app.AppConfig
 import com.rahgozar.app.R
+import com.rahgozar.app.ads.SmartTunnel
 import com.rahgozar.app.dto.GroupMapItem
 import com.rahgozar.app.dto.LocateTarget
 import com.rahgozar.app.dto.TestServiceMessage
@@ -95,7 +96,24 @@ class MainViewModel(
         }
     }
 
+    /** The events that are about the tunnel's own state, as HomeViewModel masks them. */
+    private fun describesTheTunnel(event: MainServiceEvent): Boolean = when (event) {
+        MainServiceEvent.StateRunning,
+        MainServiceEvent.StateNotRunning,
+        MainServiceEvent.StateStartSuccess,
+        MainServiceEvent.StateStopSuccess,
+        is MainServiceEvent.StateStartFailure -> true
+
+        else -> false
+    }
+
     private fun handleServiceEvent(event: MainServiceEvent) {
+        // The ad flow's tunnel is the panel's, not a connection the user made.
+        // HomeViewModel has always masked its events; this one did not, so the
+        // ad flow surfaced as toasts — "Start Services Success" just after the
+        // user tapped Disconnect, raw English errors from its candidates — and
+        // as a "running" state that settings changes would restart.
+        if (SmartTunnel.isActive && describesTheTunnel(event)) return
         when (event) {
             MainServiceEvent.StateRunning -> updateRunningState(true, clearTestingText = false)
             MainServiceEvent.StateNotRunning -> updateRunningState(false, clearTestingText = false)

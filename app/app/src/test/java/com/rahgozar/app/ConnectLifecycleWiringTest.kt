@@ -246,6 +246,78 @@ class ConnectLifecycleWiringTest {
         )
     }
 
+    @Test
+    fun `a failed reload takes the whole service down, serialised with a stop`() {
+        // The core was stopped and the tun left up with nothing behind it:
+        // traffic vanished while the screen said off and the key icon said on.
+        val core = source("core/CoreServiceManager.kt")
+        val reload = core.between("private fun reloadCore()", "fun queryAllOutboundTrafficStats")
+        assertTrue("a failed reload must stop the service:\n$reload", reload.contains("serviceControl?.get()?.stopService()"))
+        assertTrue("reload and stop must share a lock", reload.contains("synchronized(lifecycleLock)") &&
+            core.between("fun stopCoreLoop()", "private fun startNetworkMonitor").contains("synchronized(lifecycleLock)"))
+    }
+
+    @Test
+    fun `an allow list that added no app falls back to excluding this one`() {
+        val apply = source("service/PerAppProxy.kt").between("fun apply(", "private fun coreDialAddressesKnown")
+        assertTrue(
+            "an allow list whose apps are all gone must not leave a tun that carries every app:\n$apply",
+            Regex("""if \(!bypassApps && added == 0\) \{\s*builder\.addDisallowedApplication\(selfPackageName\)""").containsMatchIn(apply),
+        )
+    }
+
+    @Test
+    fun `the list screen does not report the ad flow's tunnel`() {
+        val handle = source("ui/main/MainViewModel.kt").between("private fun handleServiceEvent(", "MainServiceEvent.StateRunning ->")
+        assertTrue(
+            "MainViewModel toasts the ad flow's tunnel events again:\n$handle",
+            handle.contains("if (SmartTunnel.isActive && describesTheTunnel(event)) return"),
+        )
+    }
+
+    @Test
+    fun `a rewarded ad that filled late is never parked`() {
+        // The parked slot is shown on the next tap by a flow with no reward to
+        // give — an Extend ad shown on a connect tap paid out nothing.
+        val request = source("ads/AdInventory.kt").between("private suspend fun requestWithin(", "fun preload(")
+        val rewardedBranch = request.between("if (placement.format.isRewarded) {", "} else if (showable(ad)) {")
+        assertTrue("late rewarded fills are parked again:\n$rewardedBranch", !rewardedBranch.contains("pending"))
+    }
+
+    @Test
+    fun `a start that never reached a service takes connecting down again`() {
+        val launcher = source("core/LauncherManager.kt").between("fun startService(", "fun stopService(")
+        assertTrue("startService must say whether the start happened:\n$launcher",
+            launcher.contains("): Boolean {") &&
+                Regex("""\bfalse\s*}\s*}\s*$""").containsMatchIn(launcher.substringAfter("} catch (e: Exception) {")))
+        val start = source("ui/main/MainActivity.kt").between("private fun startV2Ray(): Boolean", "private fun restartV2Ray")
+        assertTrue(
+            "startV2Ray ignores a refused start again:\n$start",
+            start.contains("if (!LauncherManager.startService(this))") && start.contains("homeViewModel.onStartRefused()"),
+        )
+    }
+
+    @Test
+    fun `the connecting screen outwaits the session-login check`() {
+        // 2.5s settle + 30s budget + 15s extension = 47.5s; the screen gave up at 40s.
+        val main = source("ui/main/MainActivity.kt")
+        assertTrue(
+            "awaitConnectSettled no longer gives session-login servers their own timeout",
+            main.between("private suspend fun awaitConnectSettled", "withTimeoutOrNull(settleTimeout)")
+                .contains("selectedUsesSessionLogin() -> SESSION_LOGIN_SETTLE_TIMEOUT_MS"),
+        )
+        val value = Regex("""SESSION_LOGIN_SETTLE_TIMEOUT_MS = ([\d_]+)L""").find(main)?.groupValues?.get(1)?.replace("_", "")?.toLong()
+        assertTrue("SESSION_LOGIN_SETTLE_TIMEOUT_MS must exceed the 47.5s check, is $value", value != null && value > 47_500L)
+    }
+
+    @Test
+    fun `a transient keystore failure is retried before stores are opened in the clear or wiped`() {
+        val load = source("security/SecureStore.kt").between("private fun loadOrCreateKey(", "private fun keystoreKey()")
+        assertTrue("the keystore key is not retried:\n$load", load.contains("retrying(\"the keystore key\") { keystoreKey() }"))
+        assertTrue("the unwrap is not retried before the stores are wiped:\n$load",
+            load.indexOf("retrying(\"unwrapping the store key\")") in 0 until load.indexOf("resetStores(keyring)"))
+    }
+
     // ------------------------------------------------------------ reading --
 
     private fun source(relative: String): String {

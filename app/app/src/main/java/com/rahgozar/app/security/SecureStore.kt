@@ -82,6 +82,12 @@ object SecureStore {
     /** 12 bytes is what encodes to exactly [CRYPT_KEY_CHARS] base64 characters. */
     private const val CRYPT_KEY_ENTROPY_BYTES = 12
 
+    /** How often a Keystore step is tried before its failure is believed. */
+    private const val KEYSTORE_ATTEMPTS = 3
+
+    /** The pause between those tries. */
+    private const val KEYSTORE_RETRY_MS = 150L
+
     /**
      * The stores that hold something an attacker wants, and nothing that must
      * be readable before this class is up.
@@ -161,10 +167,16 @@ object SecureStore {
     // ------------------------------------------------------------------ key --
 
     private fun loadOrCreateKey(keyring: MMKV): String? {
-        val secret = keystoreKey() ?: return null
+        // Retried, both steps. The Keystore fails transiently — a busy daemon
+        // at boot, three of our processes starting at once — and each of the
+        // two outcomes of believing one failure is expensive: no key means this
+        // process opens the stores in the clear, and a blob that "will not
+        // unwrap" means every encrypted store is wiped below, the device's
+        // registration and its servers with it.
+        val secret = retrying("the keystore key") { keystoreKey() } ?: return null
 
         keyring.decodeBytes(KEY_WRAPPED)?.let { blob ->
-            unwrap(secret, blob)?.let { return it }
+            retrying("unwrapping the store key") { unwrap(secret, blob) }?.let { return it }
             // The blob is there but will not open: the Keystore entry behind it
             // is gone or has changed. Nothing encrypted with it is readable
             // again, so the honest move is a fresh key and a clean slate —
@@ -232,6 +244,21 @@ object SecureStore {
     }.getOrElse {
         LogUtil.e(AppConfig.TAG, "secure: keystore unavailable", it as? Exception ?: Exception(it))
         null
+    }
+
+    /**
+     * [block], tried up to [KEYSTORE_ATTEMPTS] times with a short pause between.
+     * Only ever slower on the failure path, which is the one worth slowing down.
+     */
+    private fun <T> retrying(what: String, block: () -> T?): T? {
+        repeat(KEYSTORE_ATTEMPTS) { attempt ->
+            block()?.let { return it }
+            if (attempt < KEYSTORE_ATTEMPTS - 1) {
+                LogUtil.w(AppConfig.TAG, "secure: $what failed, trying again")
+                Thread.sleep(KEYSTORE_RETRY_MS)
+            }
+        }
+        return null
     }
 
     private fun wrap(secret: SecretKey, key: String): ByteArray? = runCatching {

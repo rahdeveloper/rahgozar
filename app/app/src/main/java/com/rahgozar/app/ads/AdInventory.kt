@@ -212,7 +212,16 @@ object AdInventory {
                             // Worth keeping only if it is still showable — an
                             // ad whose session has ended cannot be, because
                             // its impression would leave outside the tunnel.
-                            if (showable(ad)) {
+                            //
+                            // And never a rewarded one. The parked slot is
+                            // shown on the next tap, by a flow that has no
+                            // reward to give: an Extend ad that filled late was
+                            // shown on a connect tap and paid out nothing,
+                            // which is also exactly what AdMob forbids a
+                            // rewarded format to do.
+                            if (placement.format.isRewarded) {
+                                LogUtil.i(AppConfig.TAG, "ads: late rewarded fill dropped — nothing could pay it out")
+                            } else if (showable(ad)) {
                                 pending = ad
                                 LogUtil.i(AppConfig.TAG, "ads: late fill parked for later")
                             } else {

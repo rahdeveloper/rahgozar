@@ -28,6 +28,7 @@ import com.rahgozar.app.panel.AdManager
 import com.rahgozar.app.panel.AdSlot
 import com.rahgozar.app.panel.PanelSync
 import com.rahgozar.app.panel.TunnelSettings
+import com.rahgozar.app.service.SingBoxConfig
 import com.rahgozar.app.service.TunnelState
 import com.rahgozar.app.ui.AboutActivity
 import androidx.compose.runtime.LaunchedEffect
@@ -602,13 +603,25 @@ class MainActivity : HelperBaseComponentActivity() {
         return MmkvManager.decodeServerConfig(guid)?.configType == EConfigType.AETHER
     }
 
+    /** An AnyConnect-style server, verified by its traffic rather than a probe. */
+    private fun selectedUsesSessionLogin(): Boolean {
+        val guid = MmkvManager.getSelectServer() ?: return false
+        val profile = MmkvManager.decodeServerConfig(guid) ?: return false
+        return profile.configType == EConfigType.SINGBOX &&
+            SingBoxConfig.usesSessionLogin(profile.singboxConfig.orEmpty())
+    }
+
     private suspend fun awaitConnectSettled() {
         // Aether reports success or failure itself, from the engine's own verdict
         // (data confirmed, or every gateway exhausted), and its hunt can run a full
         // thorough scan on a high-latency network. So wait for that verdict rather
         // than the tighter window the Xray cores settle within — otherwise a slow
         // connect is called failed here while it is, in fact, still coming up.
-        val settleTimeout = if (selectedIsAether()) AETHER_SETTLE_TIMEOUT_MS else CONNECT_SETTLE_TIMEOUT_MS
+        val settleTimeout = when {
+            selectedIsAether() -> AETHER_SETTLE_TIMEOUT_MS
+            selectedUsesSessionLogin() -> SESSION_LOGIN_SETTLE_TIMEOUT_MS
+            else -> CONNECT_SETTLE_TIMEOUT_MS
+        }
         withTimeoutOrNull(settleTimeout) {
             while (true) {
                 homeViewModel.uiState.first { !it.isConnecting }
@@ -757,7 +770,14 @@ class MainActivity : HelperBaseComponentActivity() {
         ) {
             checkAndRequestPermission(PermissionType.ACCESS_LOCAL_NETWORK) {}
         }
-        LauncherManager.startService(this)
+        if (!LauncherManager.startService(this)) {
+            // The start failed before any service was asked, and the user has
+            // been told why. It used to report success anyway: the dial kept
+            // spinning, and the Connecting screen waited out its whole timeout
+            // to call failed a start that had never happened.
+            homeViewModel.onStartRefused()
+            return false
+        }
         return true
     }
 
@@ -824,6 +844,15 @@ class MainActivity : HelperBaseComponentActivity() {
         // The service still decides the outcome; this only stops the screen from
         // pre-empting it.
         const val AETHER_SETTLE_TIMEOUT_MS = 130_000L
+
+        /**
+         * Past the traffic check's worst case for a session-login server:
+         * HomeViewModel's 2.5s settle, its 30s budget, and the 15s it extends
+         * that by once the gateway wakes — 47.5s, against the 40s every other
+         * server gets. Shorter, and the screen said "couldn't connect" while
+         * the check was still deciding, then the dial turned on behind it.
+         */
+        const val SESSION_LOGIN_SETTLE_TIMEOUT_MS = 55_000L
 
         /**
          * How long «متصل شدید» stays before the home screen takes over.

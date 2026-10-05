@@ -60,6 +60,14 @@ object CoreServiceManager {
     @Volatile
     private var isReloading = false
 
+    /**
+     * Serialises an in-place reload with a stop. The reload runs on the network
+     * callback's thread and the stop on the service's, and unserialised a stop
+     * landing mid-reload could leave the reloaded core running after its
+     * service had gone.
+     */
+    private val lifecycleLock = Any()
+
     /** Tun descriptor the core was started with, null in the proxy only and root run modes. */
     private var currentVpnInterface: ParcelFileDescriptor? = null
 
@@ -224,7 +232,7 @@ object CoreServiceManager {
      * Unregisters broadcast receivers, stops notifications, and shuts down plugins.
      * @return True if the core was stopped successfully, false otherwise.
      */
-    fun stopCoreLoop(): Boolean {
+    fun stopCoreLoop(): Boolean = synchronized(lifecycleLock) {
         val service = getService() ?: return false
 
         networkMonitor?.unregister()
@@ -287,7 +295,7 @@ object CoreServiceManager {
      *
      * @return True if the core is running again.
      */
-    private fun reloadCore(): Boolean {
+    private fun reloadCore(): Boolean = synchronized(lifecycleLock) {
         if (isReloading) return false
         val service = getService() ?: return false
         if (!isRunning()) return false
@@ -307,6 +315,12 @@ object CoreServiceManager {
             val message = e.message?.takeUnless { it.isBlank() } ?: e.javaClass.simpleName
             LogUtil.e(AppConfig.TAG, "StartCore-Manager: Failed to reload core: $message", e)
             MessageHelper.sendMsg2UI(service, AppConfig.MSG_STATE_START_FAILURE, message)
+            // The core is already stopped, and the interface and the notification
+            // are still up: every packet went into a tun with nothing behind it,
+            // while the screen said "off" and the key icon said otherwise. The
+            // whole service comes down instead, which is the state the screen
+            // already reports.
+            runCatching { serviceControl?.get()?.stopService() }
             false
         } finally {
             isReloading = false

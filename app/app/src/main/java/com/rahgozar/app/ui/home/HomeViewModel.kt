@@ -905,6 +905,11 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         setLink(LinkState.CONNECTING)
     }
 
+    /** The start never reached a service, so nothing is connecting after all. */
+    fun onStartRefused() {
+        setLink(LinkState.OFF)
+    }
+
     /**
      * The user asked for more time.
      *

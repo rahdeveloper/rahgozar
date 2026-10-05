@@ -51,24 +51,30 @@ object LauncherManager {
      * @param honourOverride see [startContextService]. Defaults to false, so a
      *   caller that has not thought about the run-guid override cannot be the
      *   one that runs a stale one.
+     * @return false when the start failed before any service was asked — no
+     *   server, a profile that will not decode — in which case the user has
+     *   already been told why. A caller that has put "connecting" on screen
+     *   must take it down again; see MainActivity.startV2Ray.
      */
     fun startService(
         context: Context,
         guid: String? = null,
         quiet: Boolean = false,
         honourOverride: Boolean = false,
-    ) {
+    ): Boolean {
         LogUtil.i(AppConfig.TAG, "LauncherManager: startService from ${context::class.java.simpleName}")
 
         if (guid != null) {
             MmkvManager.setSelectServer(guid)
         }
 
-        try {
+        return try {
             startContextService(context, quiet, honourOverride)
+            true
         } catch (e: Exception) {
             LogUtil.e(AppConfig.TAG, "LauncherManager: ${e.message}", e)
             context.toast(e.message ?: e.javaClass.simpleName)
+            false
         }
     }
 

@@ -160,6 +160,7 @@ object PerAppProxy {
             else -> apps.remove(selfPackageName)
         }
 
+        var added = 0
         apps.forEach {
             try {
                 if (bypassApps) {
@@ -167,11 +168,21 @@ object PerAppProxy {
                 } else {
                     builder.addAllowedApplication(it)
                 }
+                added++
             } catch (e: PackageManager.NameNotFoundException) {
                 // The app was uninstalled after being picked. Not fatal: the
                 // rest of the list is still valid.
                 LogUtil.e(AppConfig.TAG, "$tag: Failed to configure app $it", e)
             }
+        }
+
+        // An allow list whose every app has since been uninstalled added
+        // nothing, and a tun with no allowed and no disallowed apps carries
+        // every app — this one included. For Xray, which cannot protect its own
+        // sockets, that sent the core's uplink into its own tunnel and every
+        // server read as dead. It is treated as what it now is: nothing chosen.
+        if (!bypassApps && added == 0) {
+            builder.addDisallowedApplication(selfPackageName)
         }
     }
 
