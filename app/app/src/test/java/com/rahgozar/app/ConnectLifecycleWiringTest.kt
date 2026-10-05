@@ -130,13 +130,17 @@ class ConnectLifecycleWiringTest {
     fun `an Aether stop during the gateway search is honoured`() {
         val aether = source("service/AetherVpnService.kt")
         val run = aether.between("private fun runEngine(", "private fun establishTunnel(")
+        // After the search loop has finished — its last statement is the "no
+        // gateway" warning — and before the result is used. The check at the top
+        // of each attempt does not count: the stop lands inside an attempt.
+        val loopEnds = run.indexOf("no gateway on")
         val searchEnds = run.indexOf("val cfg = chosen")
-        val recheck = run.lastIndexOf("if (!stillOurs()) return", searchEnds)
         val establishes = run.indexOf("establishTunnel(")
+        assertTrue("runEngine's search loop has changed shape — re-point this test", loopEnds in 0 until searchEnds)
         assertTrue(
             "runEngine must ask again after the search, before bringing a tunnel up — a stop lands " +
                 "inside the blocking search unseen:\n$run",
-            recheck in 0 until searchEnds && searchEnds < establishes,
+            run.substring(loopEnds, searchEnds).contains("if (!stillOurs()) return") && searchEnds < establishes,
         )
         assertTrue(
             "a worker that outlived its session must not tear down the next one:\n$run",
