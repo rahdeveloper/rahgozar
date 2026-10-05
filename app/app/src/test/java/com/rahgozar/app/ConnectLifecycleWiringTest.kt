@@ -136,9 +136,11 @@ class ConnectLifecycleWiringTest {
         val xray = Regex("""log\.loglevel = (.+)""").findAll(source("core/CoreConfigManager.kt"))
             .map { it.groupValues[1].trim() }.toList()
         assertTrue("the Xray core's level is not LogUtil.LEVEL everywhere: $xray", xray.isNotEmpty() && xray.all { it == "LogUtil.LEVEL" })
+        val singBox = source("service/SingBoxConfig.kt").between("fun forTunnel(", "config.getAsJsonArray(\"inbounds\")")
         assertTrue(
-            "sing-box's level no longer follows the build",
-            source("service/SingBoxConfig.kt").contains("addProperty(\"level\", if (BuildConfig.DEBUG) \"debug\" else \"warn\")"),
+            "sing-box's level no longer follows the build, or a release build writes its log to a file:\n$singBox",
+            singBox.contains("addProperty(\"level\", if (BuildConfig.DEBUG) \"debug\" else \"warn\")") &&
+                singBox.contains("if (BuildConfig.DEBUG) addProperty(\"output\", SingBoxNative.tunnelLogPath())"),
         )
     }
 
