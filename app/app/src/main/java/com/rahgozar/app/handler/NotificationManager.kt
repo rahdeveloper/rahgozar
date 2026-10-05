@@ -15,6 +15,7 @@ import com.rahgozar.app.AppConfig
 import com.rahgozar.app.R
 import com.rahgozar.app.core.CoreServiceManager
 import com.rahgozar.app.dto.entities.ProfileItem
+import com.rahgozar.app.enums.EConfigType
 import com.rahgozar.app.extension.toSpeedString
 import com.rahgozar.app.helper.MessageHelper
 import com.rahgozar.app.panel.PanelStore
@@ -30,6 +31,9 @@ import kotlin.math.min
 
 object NotificationManager {
     private const val NOTIFICATION_ID = 1
+
+    /** Cores whose services do not handle MSG_STATE_RESTART; see showNotification. */
+    private val CORES_WITHOUT_RESTART = setOf(EConfigType.SINGBOX, EConfigType.OPENVPN, EConfigType.AETHER)
     private const val NOTIFICATION_PENDING_INTENT_CONTENT = 0
     private const val NOTIFICATION_PENDING_INTENT_STOP_V2RAY = 1
     private const val NOTIFICATION_PENDING_INTENT_RESTART_V2RAY = 2
@@ -129,17 +133,21 @@ object NotificationManager {
             .setContentIntent(contentPendingIntent)
 
         if (!smart) {
-            mBuilder
-                ?.addAction(
-                    R.drawable.ic_delete_24dp,
-                    service.getString(R.string.notification_action_stop_v2ray),
-                    stopV2RayPendingIntent
-                )
-                ?.addAction(
+            mBuilder?.addAction(
+                R.drawable.ic_delete_24dp,
+                service.getString(R.string.notification_action_stop_v2ray),
+                stopV2RayPendingIntent
+            )
+            // Offered only where something answers it: CoreServiceManager, in
+            // the Xray process. The sing-box, OpenVPN and Aether services listen
+            // for register and stop only, so on them this button did nothing.
+            if (currentConfig?.configType !in CORES_WITHOUT_RESTART) {
+                mBuilder?.addAction(
                     R.drawable.ic_restore_24dp,
                     service.getString(R.string.title_service_restart),
                     restartV2RayPendingIntent
                 )
+            }
         }
 
         //mBuilder?.setDefaults(NotificationCompat.FLAG_ONLY_ALERT_ONCE)

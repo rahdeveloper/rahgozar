@@ -6,6 +6,7 @@ import android.os.Build
 import androidx.core.content.ContextCompat
 import com.rahgozar.app.AppConfig
 import com.rahgozar.app.R
+import com.rahgozar.app.ads.SessionLimit
 import com.rahgozar.app.ads.SmartTunnel
 import com.rahgozar.app.enums.EConfigType
 import com.rahgozar.app.extension.isComplexType
@@ -105,7 +106,17 @@ object LauncherManager {
         // Note: isRunning check is removed here to avoid loading Native libraries in the UI process.
         // The check is performed in CoreServiceManager when the service starts in the daemon process.
 
-        if (!honourOverride) SmartTunnel.clearSession()
+        if (!honourOverride) {
+            SmartTunnel.clearSession()
+            // Every fresh connection starts its own clock, here, before the
+            // tunnel does — whichever surface asked for it. It used to start
+            // only from the app's connect button, so the tile, the widget, the
+            // shortcuts and start-on-boot either inherited a stale deadline (and
+            // were cut within a second of connecting) or ran with no limit at
+            // all. The smart tunnel and a restart honour the override and keep
+            // the clock they have.
+            SessionLimit.begin()
+        }
 
         // The run server, not the selection: identical except while the smart
         // session's override is in place. See [MmkvManager.getRunServer].

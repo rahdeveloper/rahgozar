@@ -34,6 +34,15 @@ object AdManager {
     val current: AdsConfig get() = config
 
     /**
+     * Whether any configuration has been applied in this process. A process
+     * that skipped the splash entirely has none, and has to apply the stored
+     * one itself — see MainActivity.onCreate.
+     */
+    @Volatile
+    var applied: Boolean = false
+        private set
+
+    /**
      * Applies a freshly-fetched configuration.
      *
      * Safe to call on every sync. Deliberately does *not* start the SDK any
@@ -44,6 +53,7 @@ object AdManager {
      */
     fun apply(context: Context, ads: AdsConfig) {
         config = ads
+        applied = true
         if (!ads.enabled) {
             LogUtil.i(AppConfig.TAG, "ads: disabled by panel")
             return

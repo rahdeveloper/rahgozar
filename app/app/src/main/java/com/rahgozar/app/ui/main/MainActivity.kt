@@ -16,7 +16,6 @@ import com.rahgozar.app.R
 import com.rahgozar.app.ads.AdInventory
 import com.rahgozar.app.ads.ConnectAdFlow
 import com.rahgozar.app.ads.DisconnectAdFlow
-import com.rahgozar.app.ads.SessionLimit
 import com.rahgozar.app.ads.SmartTunnel
 import com.rahgozar.app.core.LauncherManager
 import com.rahgozar.app.enums.PermissionType
@@ -27,6 +26,8 @@ import com.rahgozar.app.handler.SettingsChangeManager
 import com.rahgozar.app.handler.SettingsManager
 import com.rahgozar.app.panel.AdManager
 import com.rahgozar.app.panel.AdSlot
+import com.rahgozar.app.panel.PanelSync
+import com.rahgozar.app.panel.TunnelSettings
 import com.rahgozar.app.service.TunnelState
 import com.rahgozar.app.ui.AboutActivity
 import androidx.compose.runtime.LaunchedEffect
@@ -54,9 +55,11 @@ import com.rahgozar.app.ui.home.HomeViewModel
 import com.rahgozar.app.ui.servers.ServerListScreen
 import com.rahgozar.app.ui.perappproxy.PerAppProxyActivity
 import com.rahgozar.app.ui.settings.SettingsActivity
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 /**
@@ -147,6 +150,21 @@ class MainActivity : HelperBaseComponentActivity() {
         // there — and, worse, leave the run override pointing the connect
         // button at the smart server. Reconciled before the user can tap.
         SmartTunnel.reconcile(this)
+
+        // A process that never went through the splash — reopened from the
+        // tunnel's notification, or from Recents after Android killed it — has
+        // no ad configuration in memory: AdManager starts disabled, and for the
+        // whole of that process the Extend button and the connect and
+        // disconnect ads were simply gone. The splash's own skip path applies
+        // the stored configuration for this reason; this is the same, for the
+        // way in that skips the splash altogether. Storing only — the SDK is
+        // started by the ad flow, through the Smart tunnel, as before.
+        if (!AdManager.applied) {
+            PanelSync.storedConfiguration()?.let { stored ->
+                TunnelSettings.apply(stored.settings)
+                AdManager.apply(this, stored.ads)
+            }
+        }
 
         checkAndRequestPermission(PermissionType.POST_NOTIFICATIONS) {}
     }
@@ -533,6 +551,7 @@ class MainActivity : HelperBaseComponentActivity() {
                 }
             } finally {
                 connecting.value = false
+                releaseSmartTunnelIfAbandoned()
             }
         }
     }
@@ -657,8 +676,28 @@ class MainActivity : HelperBaseComponentActivity() {
                 if (pending == null) action()
             } finally {
                 busy.value = false
+                releaseSmartTunnelIfAbandoned()
             }
         }
+    }
+
+    /**
+     * Brings the ad flow's tunnel down when the flow that owned it was cut off.
+     *
+     * The connect journey and the parked-ad flow tear that tunnel down as
+     * their last step, and on every path that finishes it is already down by
+     * the time this runs, so this does nothing. But this Activity is recreated
+     * by a rotation, a dark-mode switch or a font change, and that cancels the
+     * flow mid-ad — past its own teardown. The tunnel then stayed up, carrying
+     * this app, Play services and the browsers through the operator's server,
+     * for minutes until its watchdog. This is the same teardown, run in
+     * NonCancellable because it runs exactly when the scope is being cancelled,
+     * and against the application context because this Activity is going away.
+     * The ad scenario itself is unchanged.
+     */
+    private suspend fun releaseSmartTunnelIfAbandoned() {
+        if (!SmartTunnel.isActive) return
+        withContext(NonCancellable) { SmartTunnel.stop(applicationContext) }
     }
 
     private fun handleLayoutTestClick() {
@@ -710,10 +749,8 @@ class MainActivity : HelperBaseComponentActivity() {
         // smart profile here, on a tunnel scoped to this app alone, and the
         // user would watch a "connected" dial carry nothing.
         SmartTunnel.clearSession()
-        // The clock starts before the tunnel does, so the countdown covers the
-        // whole connection rather than beginning wherever the core happened to
-        // finish. A panel with no limit clears it instead.
-        SessionLimit.begin()
+        // The session clock is started by LauncherManager.startService below,
+        // for every fresh connection whatever asked for it — see there.
         homeViewModel.onConnectRequested()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.CINNAMON_BUN &&
             MmkvManager.decodeSettingsBool(AppConfig.PREF_PROXY_SHARING)

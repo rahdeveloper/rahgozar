@@ -107,10 +107,11 @@ object SessionLimit {
     /**
      * Starts the clock for a connection that is about to begin.
      *
-     * Called from the screen that asked for the connection, before the tunnel
-     * is up, so the countdown covers the whole of it. A panel with no limit
-     * clears the deadline instead, which is what makes turning the feature off
-     * take effect on the next connect rather than the next release.
+     * Called by LauncherManager for every fresh connection — the connect
+     * button, the tile, the widget, the shortcuts, start-on-boot — before the
+     * tunnel is up, so the countdown covers the whole of it. A panel with no
+     * limit clears the deadline instead, which is what makes turning the
+     * feature off take effect on the next connect rather than the next release.
      */
     fun begin() {
         if (!enabled) {

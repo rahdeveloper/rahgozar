@@ -169,6 +169,83 @@ class ConnectLifecycleWiringTest {
         )
     }
 
+    @Test
+    fun `asking whether the tunnel runs does not cut its check short`() {
+        // The quick-settings tile asks on every pull-down, and the answer was
+        // taken as "connected" mid-check; the check's own deadline then tore
+        // down a working tunnel.
+        val home = source("ui/home/HomeViewModel.kt")
+        val events = home.between("private fun onServiceEvent(", "is MainServiceEvent.SpeedUpdate")
+        assertTrue(
+            "StateRunning sets the link while a check is still deciding:\n$events",
+            events.contains("MainServiceEvent.StateRunning ->") && events.contains("if (!verifying()) setLink(LinkState.ON)"),
+        )
+        assertTrue(
+            "a stop or a failure no longer ends the pending check:\n$events",
+            Regex("""StateStopSuccess -> \{\s*cancelVerification\(\)""").containsMatchIn(events) &&
+                Regex("""StateStartFailure -> \{\s*cancelVerification\(\)""").containsMatchIn(events),
+        )
+        val openVpn = source("service/OpenVpnService.kt")
+        assertTrue(
+            "OpenVPN must say it is running only once CONNECTED, not during the handshake",
+            openVpn.contains("if (connected) notifyUi(AppConfig.MSG_STATE_RUNNING") &&
+                Regex("""name == "CONNECTED" -> \{\s*connected = true""").containsMatchIn(openVpn),
+        )
+    }
+
+    @Test
+    fun `a connect cut off mid-ad does not strand the ad flow's tunnel`() {
+        // A rotation or a theme change recreates the Activity and cancels the
+        // flow before its own teardown; the smart tunnel stayed up for minutes.
+        val main = source("ui/main/MainActivity.kt")
+        val dial = main.between("private fun dial(", "private suspend fun runAdBeforeConnect")
+        val parked = main.between("private fun showPendingAdThen(", "private suspend fun releaseSmartTunnelIfAbandoned")
+        for ((name, body) in listOf("dial" to dial, "showPendingAdThen" to parked)) {
+            assertTrue(
+                "$name's finally no longer releases an abandoned smart tunnel:\n$body",
+                Regex("""finally \{[^}]*releaseSmartTunnelIfAbandoned\(\)""").containsMatchIn(body),
+            )
+        }
+        val release = main.between("private suspend fun releaseSmartTunnelIfAbandoned", "\n    }\n")
+        assertTrue("the release must run NonCancellable:\n$release", release.contains("withContext(NonCancellable)"))
+    }
+
+    @Test
+    fun `every fresh connection starts its own session clock`() {
+        // Started only from the connect button, the tile, the widget, the
+        // shortcuts and start-on-boot inherited a stale deadline or ran unlimited.
+        val start = source("core/LauncherManager.kt").between("private fun startContextService(", "val guid = MmkvManager.getRunServer()")
+        assertTrue(
+            "LauncherManager must start the session clock for every fresh connection:\n$start",
+            Regex("""if \(!honourOverride\) \{[^}]*SessionLimit\.begin\(\)""").containsMatchIn(start),
+        )
+        val main = source("ui/main/MainActivity.kt").lines().filterNot { it.trim().startsWith("//") }.joinToString("\n")
+        assertTrue("MainActivity starts the clock a second time again", !main.contains("SessionLimit.begin()"))
+    }
+
+    @Test
+    fun `a process that skipped the splash still has its ad configuration`() {
+        val onCreate = source("ui/main/MainActivity.kt").between("override fun onCreate(", "override fun onResume()")
+        assertTrue(
+            "MainActivity no longer applies the stored configuration in a process that skipped the splash:\n$onCreate",
+            onCreate.contains("if (!AdManager.applied)") && onCreate.contains("AdManager.apply(this, stored.ads)"),
+        )
+    }
+
+    @Test
+    fun `the notification offers Restart only on the core that answers it`() {
+        val notification = source("handler/NotificationManager.kt")
+        val cores = notification.between("CORES_WITHOUT_RESTART = setOf(", ")")
+        for (type in listOf("SINGBOX", "OPENVPN", "AETHER")) {
+            assertTrue("$type must not be offered a Restart nothing answers: $cores", cores.contains("EConfigType.$type"))
+        }
+        val actions = notification.between("if (!smart) {", "service.startForeground(")
+        assertTrue(
+            "the Restart action is added without the core check:\n$actions",
+            actions.indexOf("CORES_WITHOUT_RESTART") in 0 until actions.indexOf("title_service_restart"),
+        )
+    }
+
     // ------------------------------------------------------------ reading --
 
     private fun source(relative: String): String {

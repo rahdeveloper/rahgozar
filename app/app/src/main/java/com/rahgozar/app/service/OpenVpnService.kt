@@ -114,6 +114,16 @@ class OpenVpnService : VpnService(), ServiceControl {
     private var worker: Thread? = null
 
     private val isStopping = AtomicBoolean(false)
+
+    /**
+     * True from CONNECTED until the session stops — the only span in which this
+     * service may say it is running. It used to say so whenever its worker was
+     * alive, which includes the whole handshake, so anything that asked (the
+     * quick-settings tile does, on every pull-down) put "connected" on the
+     * screen before the tunnel could carry a byte.
+     */
+    @Volatile
+    private var connected = false
     private var receiverRegistered = false
     private var trafficJob: Job? = null
 
@@ -137,7 +147,7 @@ class OpenVpnService : VpnService(), ServiceControl {
                 // traffic: every service hears this, and a "not running" from
                 // an idle one would overwrite the answer of the one that is.
                 AppConfig.MSG_REGISTER_CLIENT ->
-                    if (worker?.isAlive == true) notifyUi(AppConfig.MSG_STATE_RUNNING, "")
+                    if (connected) notifyUi(AppConfig.MSG_STATE_RUNNING, "")
 
                 AppConfig.MSG_STATE_STOP -> {
                     LogUtil.i(AppConfig.TAG, "$TAG: stop requested")
@@ -197,6 +207,7 @@ class OpenVpnService : VpnService(), ServiceControl {
         // running on an object whose previous session already stopped. Safe
         // here — the session latch above is released only once that stop ended.
         isStopping.set(false)
+        connected = false
 
         if (!ensureNativeLoaded()) {
             stopWithFailure("the OpenVPN core is not available on this device")
@@ -396,6 +407,7 @@ class OpenVpnService : VpnService(), ServiceControl {
     private fun onCoreEvent(name: String, info: String, fatal: Boolean) {
         when {
             name == "CONNECTED" -> {
+                connected = true
                 deadlineJob?.cancel()
                 deadlineJob = null
                 notifyUi(AppConfig.MSG_STATE_START_SUCCESS, "")
@@ -451,6 +463,7 @@ class OpenVpnService : VpnService(), ServiceControl {
      */
     private fun stopVpn() {
         if (!isStopping.compareAndSet(false, true)) return
+        connected = false
         try {
             stopTrafficLoop()
             deadlineJob?.cancel()

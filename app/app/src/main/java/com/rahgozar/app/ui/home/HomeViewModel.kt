@@ -144,16 +144,34 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         when (event) {
             // Rebinding to a tunnel that is already up — the app was reopened.
             // It has been carrying traffic all along, so it needs no gate.
-            MainServiceEvent.StateRunning -> setLink(LinkState.ON)
+            //
+            // Except while this connection's gate is still deciding. The same
+            // answer comes back whenever anything asks the tunnel whether it is
+            // running — pulling down the quick-settings tile does — and taking
+            // it as "connected" cut the check short: the probe's verdict was
+            // then ignored, and the check's own deadline later tore down a
+            // tunnel that worked, as "server not responding".
+            MainServiceEvent.StateRunning ->
+                if (!verifying()) setLink(LinkState.ON)
 
             MainServiceEvent.StateStartSuccess -> onTunnelUp()
 
             is MainServiceEvent.MeasureDelayResult -> onVerified(event.delayMillis)
 
+            // A stop or a failure ends the check with it. Left pending, it
+            // fired after the tunnel was gone: "server not responding" for a
+            // stop the user asked for, and a stop sent to whatever tunnel had
+            // been started since.
             MainServiceEvent.StateNotRunning,
-            MainServiceEvent.StateStopSuccess -> setLink(LinkState.OFF)
+            MainServiceEvent.StateStopSuccess -> {
+                cancelVerification()
+                setLink(LinkState.OFF)
+            }
 
-            is MainServiceEvent.StateStartFailure -> setLink(LinkState.OFF)
+            is MainServiceEvent.StateStartFailure -> {
+                cancelVerification()
+                setLink(LinkState.OFF)
+            }
 
             is MainServiceEvent.SpeedUpdate -> _uiState.update {
                 it.copy(
@@ -480,10 +498,23 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
             VERIFY_TIMEOUT_MS
         }
 
+    /** Whether a connection's gate is waiting for its verdict right now. */
+    private fun verifying(): Boolean = verifyGuid != null && _uiState.value.link == LinkState.CONNECTING
+
+    /** Ends a pending check without a verdict: the tunnel it was for is gone. */
+    private fun cancelVerification() {
+        verifyJob?.cancel()
+        verifyJob = null
+        verifyGuid = null
+    }
+
     private fun onVerified(delayMillis: Long) {
         // Only interesting while a connection is waiting on it. Otherwise this
-        // is just the user having pressed "test".
-        if (verifyGuid == null || _uiState.value.link != LinkState.CONNECTING) {
+        // is just the user having pressed "test" — or a check that something
+        // else already settled, whose own deadline must not fire later and
+        // tear down the tunnel it was about.
+        if (!verifying()) {
+            if (verifyGuid != null) cancelVerification()
             _uiState.update { it.copy(pingMs = delayMillis, testing = false) }
             return
         }
