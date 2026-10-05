@@ -29,6 +29,7 @@ import java.io.File
 import java.lang.ref.SoftReference
 import java.net.InetAddress
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Runs the Aether (Cloudflare WARP over MASQUE) core in its own process.
@@ -53,7 +54,14 @@ class AetherVpnService : VpnService(), ServiceControl {
     @Volatile
     private var coreRunning = false
 
+    /**
+     * The engine thread. Never cleared on a stop: it can outlive its session by
+     * minutes, and whether it is still alive is what a new start has to ask.
+     */
     private var worker: Thread? = null
+
+    /** Which start the running worker belongs to; see [runEngine]. */
+    private val sessionEpoch = AtomicInteger(0)
 
     /** The same control channel the other services listen on. */
     private val messageReceiver = object : BroadcastReceiver() {
@@ -101,6 +109,14 @@ class AetherVpnService : VpnService(), ServiceControl {
             LogUtil.w(AppConfig.TAG, "$TAG: already running, ignoring start")
             return START_STICKY
         }
+        // The previous session's worker can outlive its stop by minutes — the
+        // gateway search blocks inside the engine, up to two minutes an attempt
+        // — and two searches on one engine fight: when the old one finished,
+        // its clean-up stopped the new session. Refused until it has ended.
+        if (worker?.isAlive == true) {
+            notifyUi(AppConfig.MSG_STATE_START_FAILURE, "the previous session is still closing")
+            return START_NOT_STICKY
+        }
         if (!sessionActive.compareAndSet(false, true)) {
             notifyUi(AppConfig.MSG_STATE_START_FAILURE, "the previous session is still closing")
             stopSelf()
@@ -120,11 +136,18 @@ class AetherVpnService : VpnService(), ServiceControl {
         }
         NotificationManager.showNotification(serverConfig)
 
-        worker = Thread({ runEngine() }, "aether-engine").apply { start() }
+        val epoch = sessionEpoch.incrementAndGet()
+        worker = Thread({ runEngine(epoch) }, "aether-engine").apply { start() }
         return START_STICKY
     }
 
-    private fun runEngine() {
+    /**
+     * @param epoch the start this worker belongs to. A stop, or a newer start,
+     *   ends its right to bring a tunnel up or to tear the service down.
+     */
+    private fun runEngine(epoch: Int) {
+        fun stillOurs() = ownsSession && sessionEpoch.get() == epoch
+
         // Connected is the engine's own verdict, tracked here so failure is only
         // ever reported when the data-plane was never confirmed.
         val ready = AtomicBoolean(false)
@@ -145,7 +168,7 @@ class AetherVpnService : VpnService(), ServiceControl {
             val order = transportOrder()
             outer@ for (mode in listOf("turbo", "balanced")) {
                 for (t in order) {
-                    if (!ownsSession) return
+                    if (!stillOurs()) return
                     val cfg = AetherConfig.tunConfig(this, t, scanMode = mode)
                     val p = NativeAetherBridge.prepare(cfg).getOrNull()
                     if (p != null) {
@@ -158,6 +181,11 @@ class AetherVpnService : VpnService(), ServiceControl {
                     LogUtil.w(AppConfig.TAG, "$TAG: no gateway on ${t.wire} ($mode)")
                 }
             }
+            // Asked again now, because the search blocks inside the engine and
+            // a stop lands there unseen: without this, a connection the user
+            // stopped — or the screen had already called failed — came up on
+            // its own minutes later.
+            if (!stillOurs()) return
             val cfg = chosen
             val engine = prepared
             if (cfg == null || engine == null) {
@@ -205,7 +233,9 @@ class AetherVpnService : VpnService(), ServiceControl {
                 return
             }
         } finally {
-            stopEverything()
+            // Only this session's own end tears the service down; a worker that
+            // outlived its session must not stop the one after it.
+            if (sessionEpoch.get() == epoch) stopEverything()
         }
     }
 
@@ -223,7 +253,14 @@ class AetherVpnService : VpnService(), ServiceControl {
             builder.addDnsServer("2606:4700:4700::1001")
             builder.addRoute("::", 0)
         }
-        runCatching { builder.addDisallowedApplication(packageName) }
+        // The user's per-app choices, through the same rule every core uses.
+        // This used to exclude this app and nothing else, so "only these apps"
+        // and bypass lists were ignored on Aether — and the "this app rides the
+        // tunnel" flag a previous core had set was never cleared, which offered
+        // the Extend ad over a tunnel this app was not inside. Aether protects
+        // its own sockets (the protector above), so like libbox and openvpn3 it
+        // needs no core exclusion.
+        PerAppProxy.apply(builder, this, TAG)
         val pfd = runCatching { builder.establish() }.getOrNull() ?: return null
         // Hand the engine full ownership of the fd. Passing the raw pfd.fd while
         // the ParcelFileDescriptor still owns it makes the engine's own close()
@@ -253,11 +290,15 @@ class AetherVpnService : VpnService(), ServiceControl {
     private fun stopEverything() {
         SessionLimit.disarm()
         coreRunning = false
+        // A gateway search in progress is abandoned first; stop() alone only
+        // unblocks run(). Whether the engine's cancel reaches into prepare() is
+        // not documented, so runEngine re-checks its session after the search
+        // either way.
+        runCatching { NativeAetherBridge.cancelScan() }
         // stop() unblocks run() and hands the engine the chance to close the tun
         // fd it now owns; we must not close it ourselves (double-close → fdsan).
         runCatching { NativeAetherBridge.stop() }
         runCatching { NativeAetherBridge.setSocketProtector(null) }
-        worker = null
         if (ownsSession) {
             notifyUi(AppConfig.MSG_STATE_STOP_SUCCESS, "")
         }

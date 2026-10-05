@@ -3,6 +3,7 @@ package com.rahgozar.app.service
 import android.content.Context
 import android.os.ParcelFileDescriptor
 import com.rahgozar.app.AppConfig
+import com.rahgozar.app.BuildConfig
 import com.rahgozar.app.contracts.Tun2SocksControl
 import com.rahgozar.app.handler.MmkvManager
 import com.rahgozar.app.handler.SettingsManager
@@ -75,7 +76,9 @@ class TProxyService(
             writeText(configContent)
         }
 //        LogUtil.i(AppConfig.TAG, "Config file created: ${configFile.absolutePath}")
-        LogUtil.d(AppConfig.TAG, "HevSocks5Tunnel Config content:\n$configContent")
+        // Debug builds only: the level is the panel's to set, and this carries
+        // the local SOCKS credentials. See the config dump in CoreServiceManager.
+        if (BuildConfig.DEBUG) LogUtil.d(AppConfig.TAG, "HevSocks5Tunnel Config content:\n$configContent")
 
         try {
 //            LogUtil.i(AppConfig.TAG, "TProxyStartService...")

@@ -102,6 +102,69 @@ class ConnectLifecycleWiringTest {
         }
     }
 
+    @Test
+    fun `no release build writes a server configuration to the log`() {
+        // The panel's tunnel_log_level is also the app's own level, and on
+        // "debug" every connect dumped the full decrypted config into logcat.
+        val dumps = sourceRoot().walkTopDown().filter { it.extension == "kt" }.flatMap { file ->
+            file.readLines().mapIndexedNotNull { i, line ->
+                val logsConfig = Regex("""LogUtil\.[a-z]\(.*(result\.content|configContent)""").containsMatchIn(line)
+                if (logsConfig && !line.contains("BuildConfig.DEBUG")) "${file.name}:${i + 1}: ${line.trim()}" else null
+            }
+        }.toList()
+        assertTrue("A configuration is logged outside a debug build:\n${dumps.joinToString("\n")}", dumps.isEmpty())
+    }
+
+    @Test
+    fun `the launcher shortcuts see every core's tunnel`() {
+        // CoreServiceManager.isRunning() only sees the Xray core of the calling
+        // process, so "Stop" did nothing on sing-box, OpenVPN and Aether.
+        for (name in listOf("ScStartActivity", "ScStopActivity", "ScSwitchActivity")) {
+            val code = source("ui/shortcut/$name.kt").lines().filterNot { it.trim().startsWith("//") }.joinToString("\n")
+            assertTrue("$name asks CoreServiceManager again:\n$code", !code.contains("CoreServiceManager.isRunning()"))
+            assertTrue("$name no longer asks TunnelState:\n$code", code.contains("TunnelState.isRunning("))
+        }
+    }
+
+    @Test
+    fun `an Aether stop during the gateway search is honoured`() {
+        val aether = source("service/AetherVpnService.kt")
+        val run = aether.between("private fun runEngine(", "private fun establishTunnel(")
+        val searchEnds = run.indexOf("val cfg = chosen")
+        val recheck = run.lastIndexOf("if (!stillOurs()) return", searchEnds)
+        val establishes = run.indexOf("establishTunnel(")
+        assertTrue(
+            "runEngine must ask again after the search, before bringing a tunnel up — a stop lands " +
+                "inside the blocking search unseen:\n$run",
+            recheck in 0 until searchEnds && searchEnds < establishes,
+        )
+        assertTrue(
+            "a worker that outlived its session must not tear down the next one:\n$run",
+            run.contains("if (sessionEpoch.get() == epoch) stopEverything()"),
+        )
+        val onStart = aether.between("override fun onStartCommand", "private fun runEngine(")
+        assertTrue("a new start must wait for the previous search to end:\n$onStart", onStart.contains("worker?.isAlive == true"))
+    }
+
+    @Test
+    fun `Aether applies the user's per-app choices like every other core`() {
+        val establish = source("service/AetherVpnService.kt").between("private fun establishTunnel(", "private fun addAddress(")
+        assertTrue(
+            "Aether builds its tun without PerAppProxy again — per-app lists ignored, and the " +
+                "\"rides the tunnel\" flag left from another core:\n$establish",
+            establish.contains("PerAppProxy.apply(builder"),
+        )
+    }
+
+    @Test
+    fun `the Xray runtime stays out of the Aether and sing-box processes`() {
+        val setter = source("core/CoreServiceManager.kt").between("var serviceControl:", "fun isRunning()")
+        assertTrue(
+            "serviceControl brings Xray up in a process that has its own core:\n$setter",
+            setter.contains("service is SingBoxService") && setter.contains("service is AetherVpnService"),
+        )
+    }
+
     // ------------------------------------------------------------ reading --
 
     private fun source(relative: String): String {

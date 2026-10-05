@@ -11,6 +11,7 @@ import android.os.ParcelFileDescriptor
 import android.system.OsConstants
 import androidx.core.content.ContextCompat
 import com.rahgozar.app.AppConfig
+import com.rahgozar.app.BuildConfig
 import com.rahgozar.app.R
 import com.rahgozar.app.ads.SessionLimit
 import com.rahgozar.app.contracts.IDialerService
@@ -24,6 +25,7 @@ import com.rahgozar.app.handler.NotificationManager
 import com.rahgozar.app.handler.SettingsManager
 import com.rahgozar.app.handler.SpeedtestManager
 import com.rahgozar.app.helper.MessageHelper
+import com.rahgozar.app.service.AetherVpnService
 import com.rahgozar.app.service.DialerNativeService
 import com.rahgozar.app.service.DialerWebviewService
 import com.rahgozar.app.service.NetworkMonitor
@@ -65,11 +67,12 @@ object CoreServiceManager {
         set(value) {
             field = value
             val service = value?.get()?.getService()
-            // The registration is all SingBoxService needs from this manager —
-            // it is how NotificationManager finds the service to put in the
-            // foreground. The rest of this setter is Xray bring-up, and in the
-            // sing-box process the Xray runtime must not come up at all.
-            if (service is SingBoxService) return
+            // The registration is all SingBoxService and AetherVpnService need
+            // from this manager — it is how NotificationManager finds the
+            // service to put in the foreground. The rest of this setter is Xray
+            // bring-up, and in their processes the Xray runtime must not come
+            // up at all: each has its own native core in that address space.
+            if (service is SingBoxService || service is AetherVpnService) return
             CoreNativeManager.initCoreEnv(service)
             if (service != null && processFinder == null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 processFinder = XrayProcessFinder(service)
@@ -154,7 +157,13 @@ object CoreServiceManager {
 
         LogUtil.i(AppConfig.TAG, "StartCore-Manager: Starting core loop for ${config.remarks}")
         val result = CoreConfigManager.getV2rayConfig(service, guid)
-        LogUtil.d(AppConfig.TAG, result.content)
+        // Debug builds only, whatever the log level says. The level is the
+        // panel's to set (tunnel_log_level), and on "debug" this line put every
+        // server's full decrypted configuration — addresses, UUIDs, passwords,
+        // Reality keys — into the logcat of every release install, readable
+        // over USB without root. The at-rest encryption of the same configs
+        // is pointless with that open.
+        if (BuildConfig.DEBUG) LogUtil.d(AppConfig.TAG, result.content)
         if (!result.status) {
             error(result.errorMessage.ifBlank { "Failed to get V2Ray config" })
         }
