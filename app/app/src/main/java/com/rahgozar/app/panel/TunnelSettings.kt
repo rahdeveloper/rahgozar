@@ -52,7 +52,10 @@ object TunnelSettings {
         "tunnel_fragment_length" to AppConfig.PREF_FRAGMENT_LENGTH,
         "tunnel_fragment_interval" to AppConfig.PREF_FRAGMENT_INTERVAL,
         "tunnel_fragment_maxsplit" to AppConfig.PREF_FRAGMENT_MAXSPLIT,
-        "tunnel_log_level" to AppConfig.PREF_LOGLEVEL,
+        // tunnel_log_level is deliberately absent: the level follows the
+        // build (LogUtil.LEVEL), so a panel left on "debug" after a test can
+        // no longer turn every release install up with it. Builds up to 2.4.5
+        // still read it.
         "tunnel_remote_dns" to AppConfig.PREF_REMOTE_DNS,
         "tunnel_domestic_dns" to AppConfig.PREF_DOMESTIC_DNS,
         "tunnel_dns_hosts" to AppConfig.PREF_DNS_HOSTS,

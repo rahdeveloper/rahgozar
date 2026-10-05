@@ -2,6 +2,7 @@ package com.rahgozar.app
 
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import com.rahgozar.app.BuildConfig
 import com.rahgozar.app.service.SingBoxConfig
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -137,6 +138,28 @@ class SingBoxTunnelConfigTest {
         assertEquals("172.19.0.1/30", config.getAsJsonArray("inbounds")[0].asJsonObject.getAsJsonArray("address")[0].asString)
         assertTrue("their config named no dns; we must not invent one", !config.has("dns"))
         assertEquals("direct", config.route().get("final").asString)
+    }
+
+    @Test
+    fun `the log level is the build's, whatever the server's configuration says`() {
+        // A configuration pasted from a desktop client brings its own level, and
+        // "info" writes a line per connection. The build decides instead.
+        val source = """
+            {
+              "log": {"level": "info", "output": "box.log"},
+              "inbounds": [{"type":"tun","tag":"tun-in","address":["172.19.0.1/30"],"auto_route":true}],
+              "outbounds": [{"type":"direct","tag":"direct"}]
+            }
+        """.trimIndent()
+
+        val log = tunnel(source).getAsJsonObject("log")
+
+        assertEquals(if (BuildConfig.DEBUG) "debug" else "warn", log.get("level").asString)
+        if (BuildConfig.DEBUG) {
+            assertTrue("a debug build writes the core's log to its own file", log.get("output").asString.endsWith("/core.log"))
+        } else {
+            assertTrue("a release build never writes the core's log to a file", !log.has("output"))
+        }
     }
 
     @Test

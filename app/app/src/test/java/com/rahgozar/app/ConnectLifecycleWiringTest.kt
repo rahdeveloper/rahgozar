@@ -116,6 +116,33 @@ class ConnectLifecycleWiringTest {
     }
 
     @Test
+    fun `the log level follows the build, never the panel`() {
+        // A panel left on "debug" after a test turned every release install up
+        // to debug with it. The level is now a fact of the build.
+        val readers = sourceRoot().walkTopDown()
+            .filter { it.extension == "kt" && it.name != "AppConfig.kt" && it.readText().contains("PREF_LOGLEVEL") }
+            .map { it.name }.toList()
+        assertTrue("the stored, panel-set level is read again by $readers", readers.isEmpty())
+        assertTrue(
+            "TunnelSettings writes the panel's tunnel_log_level again",
+            !source("panel/TunnelSettings.kt").contains("\"tunnel_log_level\" to"),
+        )
+        val log = source("util/LogUtil.kt")
+        assertTrue(
+            "LogUtil's level no longer follows the build:\n$log",
+            log.contains("val LEVEL: String = if (BuildConfig.DEBUG) \"debug\" else \"warning\"") &&
+                log.contains("val MIN_PRIORITY = if (BuildConfig.DEBUG) Log.DEBUG else Log.WARN"),
+        )
+        val xray = Regex("""log\.loglevel = (.+)""").findAll(source("core/CoreConfigManager.kt"))
+            .map { it.groupValues[1].trim() }.toList()
+        assertTrue("the Xray core's level is not LogUtil.LEVEL everywhere: $xray", xray.isNotEmpty() && xray.all { it == "LogUtil.LEVEL" })
+        assertTrue(
+            "sing-box's level no longer follows the build",
+            source("service/SingBoxConfig.kt").contains("addProperty(\"level\", if (BuildConfig.DEBUG) \"debug\" else \"warn\")"),
+        )
+    }
+
+    @Test
     fun `the launcher shortcuts see every core's tunnel`() {
         // CoreServiceManager.isRunning() only sees the Xray core of the calling
         // process, so "Stop" did nothing on sing-box, OpenVPN and Aether.

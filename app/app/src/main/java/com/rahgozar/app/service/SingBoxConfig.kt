@@ -137,20 +137,21 @@ object SingBoxConfig {
     fun forTunnel(blob: String, settings: TunnelSettings = tunnelSettings()): String {
         val config = normalize(blob)
 
-        // Nothing subscribes to the core's log, so on a debug build it goes to
-        // a file: a tunnel that comes up and then carries nothing looks
-        // identical from the outside to one that works, and this is the only
-        // place the difference is written down. Never on a release build — it
-        // would record every hostname the user visits.
-        if (BuildConfig.DEBUG && !config.has("log")) {
-            config.add(
-                "log",
-                JsonObject().apply {
-                    addProperty("level", "debug")
-                    addProperty("output", SingBoxNative.tunnelLogPath())
-                },
-            )
-        }
+        // The level is the build's, as for every core (LogUtil.LEVEL), so
+        // whatever "log" the server's configuration brought is replaced — one
+        // pasted from a desktop client often carries its own "info", a line per
+        // connection. Nothing subscribes to the core's log, so on a debug build
+        // it goes to a file: a tunnel that comes up and then carries nothing
+        // looks identical from the outside to one that works, and this is the
+        // only place the difference is written down. Never the file on a
+        // release build — it would record every hostname the user visits.
+        config.add(
+            "log",
+            JsonObject().apply {
+                addProperty("level", if (BuildConfig.DEBUG) "debug" else "warn")
+                if (BuildConfig.DEBUG) addProperty("output", SingBoxNative.tunnelLogPath())
+            },
+        )
 
         config.getAsJsonArray("inbounds")?.let { inbounds ->
             val types = inbounds.mapNotNull { (it as? JsonObject)?.string("type") }
